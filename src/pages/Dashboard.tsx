@@ -19,7 +19,7 @@ function UsageBar({ pct, color }: { pct: number; color: string }) {
 
 function isOnlineByAgent(d: Device): boolean {
   if (!d.last_seen) return false;
-  return Date.now() - new Date(d.last_seen).getTime() < 10 * 60 * 1000; // 10 min
+  return Date.now() - new Date(d.last_seen).getTime() < 30 * 60 * 1000; // 30 min
 }
 
 function AgentCard({ d }: { d: Device }) {

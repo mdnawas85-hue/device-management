@@ -58,7 +58,7 @@ function UsageBar({ pct, color }: { pct: number; color: string }) {
 }
 function isAgentOnline(d: Device) {
   if (!d.last_seen) return false;
-  return Date.now() - new Date(d.last_seen).getTime() < 10 * 60 * 1000;
+  return Date.now() - new Date(d.last_seen).getTime() < 30 * 60 * 1000;
 }
 
 // ── Edit / Add Modal ─────────────────────────────────────────────────────────
