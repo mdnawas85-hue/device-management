@@ -40,8 +40,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ── POST { device_id, file_path }  → create upload request ───────────────
   if (req.method === 'POST') {
-    const { device_id, file_path } = req.body as Record<string, string>;
-    if (!device_id || !file_path) return res.status(400).json({ error: 'device_id and file_path required' });
+    const body = req.body as Record<string, string>;
+    const { device_id } = body;
+    const file_path = body.file_path ?? ''; // empty string = drives listing request
+    if (!device_id) return res.status(400).json({ error: 'device_id required' });
 
     const now = new Date().toISOString();
     const id  = randomUUID();
