@@ -21,6 +21,10 @@ import (
 	"github.com/shirou/gopsutil/v3/net"
 )
 
+// ── Version — bump this each time you build and deploy a new .exe ─────────────
+// The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
+const AGENT_VERSION = 2
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const API_URL = "https://device-management-xi.vercel.app"
@@ -37,11 +41,15 @@ func configPath() string {
 	return filepath.Join(os.TempDir(), "devicemanager_config.json")
 }
 
-func transferDir() string {
+func agentDir() string {
 	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceManager", "Transfers")
+		return filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceManager")
 	}
-	return filepath.Join(os.TempDir(), "DeviceManager", "Transfers")
+	return filepath.Join(os.TempDir(), "DeviceManager")
+}
+
+func transferDir() string {
+	return filepath.Join(agentDir(), "Transfers")
 }
 
 func loadConfig() (*Config, error) {
@@ -106,10 +114,8 @@ func getSerialNumber() string {
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(strings.ReplaceAll(line, "\r", ""))
-		lower := strings.ToLower(line)
-		if strings.HasPrefix(lower, "serialnumber=") {
+		if strings.HasPrefix(strings.ToLower(line), "serialnumber=") {
 			val := strings.TrimSpace(line[13:])
-			// Skip placeholder values set by OEMs
 			if val == "" ||
 				strings.EqualFold(val, "To be filled by O.E.M.") ||
 				strings.EqualFold(val, "Default string") ||
@@ -127,7 +133,6 @@ func getSerialNumber() string {
 func collectHardware() HardwareInfo {
 	h := HardwareInfo{}
 
-	// Host info
 	if info, err := host.Info(); err == nil {
 		h.Hostname   = info.Hostname
 		h.OS         = info.Platform + " " + info.PlatformFamily
@@ -139,15 +144,12 @@ func collectHardware() HardwareInfo {
 		h.Platform   = info.OS
 	}
 
-	// Serial number (Windows only via BIOS WMI)
 	h.SerialNumber = getSerialNumber()
 
-	// Users
 	if users, err := host.Users(); err == nil && len(users) > 0 {
 		h.LoggedUser = users[0].User
 	}
 
-	// CPU
 	if cpuInfo, err := cpu.Info(); err == nil && len(cpuInfo) > 0 {
 		h.CPUBrand   = cpuInfo[0].ModelName
 		h.CPUCores   = int(cpuInfo[0].Cores)
@@ -157,14 +159,12 @@ func collectHardware() HardwareInfo {
 		h.CPUUsage = round2(usage[0])
 	}
 
-	// Memory
 	if memInfo, err := mem.VirtualMemory(); err == nil {
 		h.RAMTotal = memInfo.Total
 		h.RAMUsed  = memInfo.Used
 		h.RAMFree  = memInfo.Available
 	}
 
-	// Disk (aggregate all physical drives)
 	parts, _ := disk.Partitions(false)
 	for _, p := range parts {
 		if u, err := disk.Usage(p.Mountpoint); err == nil {
@@ -174,7 +174,6 @@ func collectHardware() HardwareInfo {
 		}
 	}
 
-	// Network — collect IPs, prefer IPv4, skip loopback + link-local
 	ifaces, _ := net.Interfaces()
 	var ips4, ips6 []string
 	for _, iface := range ifaces {
@@ -182,7 +181,6 @@ func collectHardware() HardwareInfo {
 		if name == "lo" || name == "lo0" || strings.HasPrefix(name, "loopback") {
 			continue
 		}
-		// Pick first non-empty, non-zero MAC
 		if h.MACAddress == "" &&
 			iface.HardwareAddr != "" &&
 			iface.HardwareAddr != "00:00:00:00:00:00" {
@@ -190,14 +188,12 @@ func collectHardware() HardwareInfo {
 		}
 		for _, addr := range iface.Addrs {
 			ip := addr.Addr
-			// Strip CIDR prefix
 			if idx := strings.Index(ip, "/"); idx != -1 {
 				ip = ip[:idx]
 			}
 			if ip == "" || ip == "127.0.0.1" || ip == "::1" {
 				continue
 			}
-			// Skip IPv6 link-local (fe80::...)
 			if strings.HasPrefix(strings.ToLower(ip), "fe80:") {
 				continue
 			}
@@ -208,7 +204,6 @@ func collectHardware() HardwareInfo {
 			}
 		}
 	}
-	// IPv4 first, then IPv6
 	h.IPAddresses = append(ips4, ips6...)
 
 	return h
@@ -233,9 +228,17 @@ type RegisterResponse struct {
 }
 
 type HeartbeatRequest struct {
-	Action string       `json:"action"`
-	Token  string       `json:"token"`
-	HW     HardwareInfo `json:"hardware"`
+	Action  string       `json:"action"`
+	Token   string       `json:"token"`
+	HW      HardwareInfo `json:"hardware"`
+	Version int          `json:"version"` // agent reports its current version
+}
+
+type HeartbeatResponse struct {
+	OK              bool   `json:"ok"`
+	UpdateAvailable bool   `json:"update_available"`
+	DownloadURL     string `json:"download_url"`
+	Error           string `json:"error"`
 }
 
 type PollTransfersRequest struct {
@@ -246,7 +249,7 @@ type PollTransfersRequest struct {
 type TransferItem struct {
 	ID       string `json:"id"`
 	Filename string `json:"filename"`
-	Data     string `json:"data"` // base64 data URL or raw base64
+	Data     string `json:"data"`
 }
 
 type PollTransfersResponse struct {
@@ -288,66 +291,119 @@ func register(hw HardwareInfo) (*Config, error) {
 	return &Config{Token: resp.Token, DeviceID: resp.DeviceID}, nil
 }
 
-func heartbeat(token string, hw HardwareInfo) error {
-	_, err := postJSON("/api/agent", HeartbeatRequest{Action: "heartbeat", Token: token, HW: hw})
-	return err
+func heartbeat(token string, hw HardwareInfo) (*HeartbeatResponse, error) {
+	data, err := postJSON("/api/agent", HeartbeatRequest{
+		Action:  "heartbeat",
+		Token:   token,
+		HW:      hw,
+		Version: AGENT_VERSION,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp HeartbeatResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // processTransfers polls for pending file transfers and saves them locally
-func processTransfers(token string) error {
+func processTransfers(token string) {
 	data, err := postJSON("/api/agent", PollTransfersRequest{Action: "poll-transfers", Token: token})
 	if err != nil {
-		return err
+		return
 	}
 	var resp PollTransfersResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return err
+		return
 	}
 	if len(resp.Transfers) == 0 {
-		return nil
+		return
 	}
 
 	dir := transferDir()
 	os.MkdirAll(dir, 0755)
 
 	for _, t := range resp.Transfers {
-		// Strip "data:...;base64," prefix if present
 		b64 := t.Data
 		if idx := strings.Index(b64, ","); idx != -1 {
 			b64 = b64[idx+1:]
 		}
-		// Decode base64
 		decoded, err := base64.StdEncoding.DecodeString(b64)
 		if err != nil {
-			// Try raw URL-safe encoding
 			decoded, err = base64.URLEncoding.DecodeString(b64)
 			if err != nil {
 				continue
 			}
 		}
-		// Save file
 		dest := filepath.Join(dir, t.Filename)
 		if err := os.WriteFile(dest, decoded, 0644); err != nil {
 			continue
 		}
-		// Acknowledge delivery
 		postJSON("/api/agent", AckTransferRequest{
 			Action:     "ack-transfer",
 			Token:      token,
 			TransferID: t.ID,
 		})
 	}
-	return nil
 }
 
-// ── Install (scheduled task setup) ───────────────────────────────────────────
+// ── Self-update ───────────────────────────────────────────────────────────────
+// Downloads the new .exe, writes a batch script to swap it after we exit,
+// then launches the batch and exits. Next scheduled-task run uses the new binary.
+func selfUpdate(downloadURL string) {
+	dir := agentDir()
+	os.MkdirAll(dir, 0755)
+
+	newExe := filepath.Join(dir, "DeviceManagerAgent_update.exe")
+	curExe := filepath.Join(dir, "DeviceManagerAgent.exe")
+
+	// Download new binary
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Get(downloadURL)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(newExe, data, 0755); err != nil {
+		return
+	}
+
+	if runtime.GOOS == "windows" {
+		// Batch script: wait 3s (so we can exit), swap exe, clean up
+		bat := filepath.Join(dir, "update.bat")
+		script := fmt.Sprintf(
+			"@echo off\r\ntimeout /t 3 /nobreak > NUL\r\nmove /y \"%s\" \"%s\"\r\ndel \"%%~f0\"\r\n",
+			newExe, curExe,
+		)
+		if err := os.WriteFile(bat, []byte(script), 0755); err != nil {
+			return
+		}
+		// Launch batch detached so it survives after we exit
+		exec.Command("cmd", "/c", "start", "", "/min", bat).Start()
+	} else {
+		// Non-Windows: just overwrite directly (not running from install path)
+		os.Rename(newExe, curExe)
+	}
+
+	// Exit so the batch can overwrite us
+	os.Exit(0)
+}
+
+// ── Install ───────────────────────────────────────────────────────────────────
 
 func installScheduledTask(exePath string) error {
 	if runtime.GOOS != "windows" {
 		fmt.Println("  [skip] Scheduled task only supported on Windows")
 		return nil
 	}
-	destDir := filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceManager")
+	destDir := agentDir()
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return err
 	}
@@ -395,7 +451,6 @@ func main() {
 
 	switch mode {
 
-	// ── Uninstall ─────────────────────────────────────────────────────────────
 	case "--uninstall":
 		uninstall()
 
@@ -406,29 +461,41 @@ func main() {
 			os.Exit(1)
 		}
 		hw := collectHardware()
-		if err := heartbeat(cfg.Token, hw); err != nil {
+		hbResp, err := heartbeat(cfg.Token, hw)
+		if err != nil {
 			os.Exit(1)
 		}
-		// Poll and save any pending file transfers
+		// Handle file transfers
 		processTransfers(cfg.Token)
+		// Self-update if API says a newer version is available
+		if hbResp.UpdateAvailable && hbResp.DownloadURL != "" {
+			selfUpdate(hbResp.DownloadURL)
+		}
 
 	// ── Install (double-clicked by user) ─────────────────────────────────────
 	default:
 		fmt.Println("╔═══════════════════════════════════════╗")
 		fmt.Println("║     Device Manager Agent Installer    ║")
+		fmt.Printf("║             Version %d                 ║\n", AGENT_VERSION)
 		fmt.Println("╚═══════════════════════════════════════╝")
 		fmt.Println()
 
-		// Already installed — just send a heartbeat update
 		if cfg, err := loadConfig(); err == nil && cfg.Token != "" {
 			fmt.Println("✓ Already registered. Running heartbeat update...")
 			hw := collectHardware()
-			if err := heartbeat(cfg.Token, hw); err != nil {
+			hbResp, err := heartbeat(cfg.Token, hw)
+			if err != nil {
 				fmt.Println("✗ Heartbeat failed:", err)
 			} else {
 				fmt.Println("✓ Device data updated successfully.")
+				if hbResp.UpdateAvailable {
+					fmt.Println("⬆ New agent version available — updating...")
+				}
 			}
 			processTransfers(cfg.Token)
+			if hbResp, err := heartbeat(cfg.Token, hw); err == nil && hbResp.UpdateAvailable && hbResp.DownloadURL != "" {
+				selfUpdate(hbResp.DownloadURL)
+			}
 			fmt.Println("\nPress Enter to exit...")
 			fmt.Scanln()
 			return
@@ -481,8 +548,7 @@ func main() {
 		fmt.Println("  Installation complete!")
 		fmt.Println("  This device is now visible in the")
 		fmt.Println("  Device Manager dashboard.")
-		fmt.Println("  Files sent from the dashboard will")
-		fmt.Printf("  be saved to: %s\n", transferDir())
+		fmt.Printf("  Agent version: %d\n", AGENT_VERSION)
 		fmt.Println("═══════════════════════════════════════")
 		fmt.Println()
 		fmt.Println("Press Enter to exit...")

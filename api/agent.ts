@@ -2,6 +2,10 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { connectDB } from './lib/mongodb.js';
 import { randomUUID } from 'crypto';
 
+// ── Bump this every time you build and deploy a new agent .exe ────────────────
+// Agents with a lower version will automatically download and replace themselves.
+const LATEST_AGENT_VERSION = 2;
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -94,8 +98,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ── HEARTBEAT — called every 5 minutes ───────────────────────────────────
   if (action === 'heartbeat') {
-    const token = body.token as string;
-    const hw    = body.hardware as Record<string, unknown>;
+    const token        = body.token   as string;
+    const hw           = body.hardware as Record<string, unknown>;
+    const agentVersion = (body.version as number) ?? 0;
     if (!token) return res.status(400).json({ error: 'token is required' });
 
     const now = new Date().toISOString();
@@ -106,17 +111,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const result = await col.findOneAndUpdate(
       { agent_token: token },
       { $set: {
-          hardware:   hw,
-          last_seen:  now,
-          updated_at: now,
-          status:     'Online',
+          hardware:      hw,
+          last_seen:     now,
+          updated_at:    now,
+          status:        'Online',
+          agent_version: agentVersion,
           ...(firstIP ? { ip_address: firstIP } : {}),
           ...(serial  ? { serial_number: serial } : {}),
       }},
       { returnDocument: 'after' },
     );
     if (!result) return res.status(404).json({ error: 'Device not found. Re-run agent installer.' });
-    return res.json({ ok: true });
+
+    // Tell the agent whether it needs to update itself
+    const updateAvailable = agentVersion < LATEST_AGENT_VERSION;
+    const proto  = (req.headers['x-forwarded-proto'] as string) ?? 'https';
+    const host   = req.headers.host as string;
+    const downloadUrl = `${proto}://${host}/DeviceManager-Setup.exe`;
+
+    return res.json({
+      ok: true,
+      update_available: updateAvailable,
+      download_url:     updateAvailable ? downloadUrl : null,
+    });
   }
 
   // ── POLL TRANSFERS — agent checks for pending files to download ───────────
