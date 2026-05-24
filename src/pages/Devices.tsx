@@ -145,11 +145,12 @@ const Modal: React.FC<ModalProps> = ({ device, onClose, onSaved }) => {
 interface TransferModalProps { device: Device; onClose: () => void; }
 const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) => {
   const fileRef   = useRef<HTMLInputElement>(null);
-  const [file,     setFile]     = useState<File | null>(null);
-  const [sending,  setSending]  = useState(false);
-  const [success,  setSuccess]  = useState('');
-  const [error,    setError]    = useState('');
-  const [transfers, setTransfers] = useState<FileTransfer[]>([]);
+  const [file,        setFile]        = useState<File | null>(null);
+  const [sending,     setSending]     = useState(false);
+  const [uploadPct,   setUploadPct]   = useState(0);
+  const [success,     setSuccess]     = useState('');
+  const [error,       setError]       = useState('');
+  const [transfers,   setTransfers]   = useState<FileTransfer[]>([]);
   const [loadingList, setLoadingList] = useState(true);
 
   const loadTransfers = async () => {
@@ -185,6 +186,7 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
       return;
     }
     setSending(true);
+    setUploadPct(0);
     setError('');
     setSuccess('');
     try {
@@ -196,13 +198,27 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
         reader.readAsDataURL(file);
       });
 
-      const res = await fetch('/api/transfers', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ device_id: device.id, filename: file.name, data }),
+      // Use XHR so we get real upload progress events
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/transfers');
+        xhr.setRequestHeader('Content-Type', 'application/json');
+
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) setUploadPct(Math.round((e.loaded / e.total) * 100));
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setUploadPct(100);
+            resolve();
+          } else {
+            try { reject(new Error(JSON.parse(xhr.responseText).error ?? 'Upload failed')); }
+            catch { reject(new Error('Upload failed')); }
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(JSON.stringify({ device_id: device.id, filename: file.name, data }));
       });
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.error ?? 'Upload failed');
 
       setSuccess(`"${file.name}" queued — the agent will download it on next heartbeat (within 5 min).`);
       setFile(null);
@@ -286,6 +302,30 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
               ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
               : <><UploadCloud className="w-4 h-4" /> Send File to Device</>}
           </button>
+
+          {/* Upload progress bar */}
+          {sending && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-400 flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin text-indigo-400" />
+                  Uploading {file?.name}
+                </span>
+                <span className="font-semibold text-indigo-300">{uploadPct}%</span>
+              </div>
+              <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
+                <div
+                  className="h-2 rounded-full bg-indigo-500 transition-all duration-200"
+                  style={{ width: `${uploadPct}%` }}
+                />
+              </div>
+              {file && (
+                <p className="text-xs text-slate-500 text-right">
+                  {fmtBytes(Math.round(file.size * uploadPct / 100))} / {fmtBytes(file.size)}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Transfer history */}
           <div>
