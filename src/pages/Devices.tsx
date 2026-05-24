@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Monitor, Plus, Search, Pencil, Trash2, Loader2, RefreshCw,
   CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
   Cpu, MemoryStick, HardDrive, Activity, Download,
+  UploadCloud, FileText, X, Clock, CheckCheck,
 } from 'lucide-react';
-import type { Device } from '../types';
+import type { Device, FileTransfer } from '../types';
 
 const STATUS_COLORS: Record<string, string> = {
   Online:      'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
@@ -39,6 +40,15 @@ function fmtUptime(s: number) {
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
 }
+function fmtAge(iso: string) {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
 function UsageBar({ pct, color }: { pct: number; color: string }) {
   return (
     <div className="w-full bg-slate-700 rounded-full h-1.5">
@@ -54,9 +64,9 @@ function isAgentOnline(d: Device) {
 // ── Edit / Add Modal ─────────────────────────────────────────────────────────
 interface ModalProps { device: Device | null; onClose: () => void; onSaved: (d: Device) => void; }
 const Modal: React.FC<ModalProps> = ({ device, onClose, onSaved }) => {
-  const [form, setForm]   = useState<Device>(device ?? { ...EMPTY });
+  const [form,   setForm]   = useState<Device>(device ?? { ...EMPTY });
   const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState('');
+  const [error,  setError]  = useState('');
   const isEdit = !!device?.id;
   const set = (k: keyof Device, v: string) => setForm(f => ({ ...f, [k]: v || null }));
 
@@ -131,6 +141,196 @@ const Modal: React.FC<ModalProps> = ({ device, onClose, onSaved }) => {
   );
 };
 
+// ── File Transfer Modal ───────────────────────────────────────────────────────
+interface TransferModalProps { device: Device; onClose: () => void; }
+const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) => {
+  const fileRef   = useRef<HTMLInputElement>(null);
+  const [file,     setFile]     = useState<File | null>(null);
+  const [sending,  setSending]  = useState(false);
+  const [success,  setSuccess]  = useState('');
+  const [error,    setError]    = useState('');
+  const [transfers, setTransfers] = useState<FileTransfer[]>([]);
+  const [loadingList, setLoadingList] = useState(true);
+
+  const loadTransfers = async () => {
+    try {
+      const res  = await fetch(`/api/transfers?device_id=${device.id}`);
+      const data = await res.json();
+      setTransfers(Array.isArray(data) ? data : []);
+    } catch { /* silently ignore */ }
+    finally { setLoadingList(false); }
+  };
+
+  useEffect(() => { loadTransfers(); }, []);
+
+  const handleFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null;
+    setFile(f);
+    setSuccess('');
+    setError('');
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files[0] ?? null;
+    setFile(f);
+    setSuccess('');
+    setError('');
+  };
+
+  const handleSend = async () => {
+    if (!file) return;
+    if (file.size > 4.5 * 1024 * 1024) {
+      setError('File too large. Maximum size is 4.5 MB.');
+      return;
+    }
+    setSending(true);
+    setError('');
+    setSuccess('');
+    try {
+      // Read file as base64 data URL
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = e => resolve(e.target!.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch('/api/transfers', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ device_id: device.id, filename: file.name, data }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error ?? 'Upload failed');
+
+      setSuccess(`"${file.name}" queued — the agent will download it on next heartbeat (within 5 min).`);
+      setFile(null);
+      if (fileRef.current) fileRef.current.value = '';
+      loadTransfers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    await fetch('/api/transfers', {
+      method:  'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id }),
+    });
+    setTransfers(prev => prev.filter(t => t.id !== id));
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+           onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/20 flex items-center justify-center">
+              <UploadCloud className="w-4 h-4 text-indigo-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white">Send File</h2>
+              <p className="text-xs text-slate-400">{device.device_name}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* Drop zone */}
+          <div
+            className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition
+              ${file ? 'border-indigo-500/50 bg-indigo-500/5' : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700/30'}`}
+            onClick={() => fileRef.current?.click()}
+            onDrop={handleDrop}
+            onDragOver={e => e.preventDefault()}
+          >
+            <input ref={fileRef} type="file" className="hidden" onChange={handleFilePick} />
+            {file ? (
+              <div className="flex items-center justify-center gap-3">
+                <FileText className="w-8 h-8 text-indigo-400 shrink-0" />
+                <div className="text-left">
+                  <p className="text-sm font-semibold text-white truncate max-w-xs">{file.name}</p>
+                  <p className="text-xs text-slate-400">{fmtBytes(file.size)}</p>
+                </div>
+              </div>
+            ) : (
+              <>
+                <UploadCloud className="w-8 h-8 text-slate-500 mx-auto mb-2" />
+                <p className="text-sm text-slate-300 font-medium">Drop file here or click to browse</p>
+                <p className="text-xs text-slate-500 mt-1">Maximum 4.5 MB · Saved to <span className="font-mono">C:\ProgramData\DeviceManager\Transfers\</span></p>
+              </>
+            )}
+          </div>
+
+          {/* Feedback */}
+          {error   && <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg px-3 py-2.5 text-sm"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}
+          {success && <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg px-3 py-2.5 text-sm"><CheckCheck className="w-4 h-4 shrink-0" />{success}</div>}
+
+          {/* Send button */}
+          <button
+            onClick={handleSend}
+            disabled={!file || sending}
+            className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-semibold py-2.5 rounded-xl text-sm transition"
+          >
+            {sending
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
+              : <><UploadCloud className="w-4 h-4" /> Send File to Device</>}
+          </button>
+
+          {/* Transfer history */}
+          <div>
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Transfer History</h3>
+            {loadingList ? (
+              <div className="flex items-center gap-2 text-slate-500 text-sm py-4 justify-center">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+              </div>
+            ) : transfers.length === 0 ? (
+              <p className="text-sm text-slate-500 text-center py-4">No transfers yet</p>
+            ) : (
+              <div className="space-y-1.5">
+                {transfers.map(t => (
+                  <div key={t.id} className="flex items-center gap-3 bg-slate-700/40 rounded-lg px-3 py-2">
+                    <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-white truncate">{t.filename}</p>
+                      <p className="text-xs text-slate-500">{fmtBytes(t.size)} · {fmtAge(t.created_at)}</p>
+                    </div>
+                    {t.status === 'delivered' ? (
+                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+                        <CheckCheck className="w-3 h-3" /> Delivered
+                      </span>
+                    ) : (
+                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
+                        <Clock className="w-3 h-3" /> Pending
+                      </span>
+                    )}
+                    {t.status === 'pending' && (
+                      <button onClick={() => handleDelete(t.id)}
+                        className="shrink-0 p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Agent Hardware expand row ─────────────────────────────────────────────────
 const HardwareRow: React.FC<{ d: Device }> = ({ d }) => {
   const hw = d.hardware;
@@ -178,7 +378,12 @@ const HardwareRow: React.FC<{ d: Device }> = ({ d }) => {
           {/* Network */}
           <div>
             <div className="flex items-center gap-1.5 text-slate-400 mb-2"><Activity className="w-3.5 h-3.5" /><span className="font-semibold">Network</span></div>
-            {(hw.ip_addresses ?? []).map((ip, i) => <p key={i} className="text-white font-mono">{ip}</p>)}
+            {(hw.ip_addresses ?? []).filter(ip => !ip.includes(':')).map((ip, i) => (
+              <p key={i} className="text-white font-mono">{ip}</p>
+            ))}
+            {(hw.ip_addresses ?? []).filter(ip => ip.includes(':')).map((ip, i) => (
+              <p key={`v6-${i}`} className="text-slate-500 font-mono text-xs truncate">{ip}</p>
+            ))}
             {hw.mac_address && <p className="text-slate-400 font-mono mt-1">{hw.mac_address}</p>}
           </div>
           {/* System */}
@@ -186,6 +391,7 @@ const HardwareRow: React.FC<{ d: Device }> = ({ d }) => {
             <div className="flex items-center gap-1.5 text-slate-400 mb-2"><Monitor className="w-3.5 h-3.5" /><span className="font-semibold">System</span></div>
             <p className="text-white">{hw.os ?? '—'} {hw.os_version}</p>
             <p className="text-slate-400">Arch: {hw.kernel_arch ?? '—'}</p>
+            {hw.serial_number && <p className="text-slate-400">S/N: <span className="font-mono">{hw.serial_number}</span></p>}
             {hw.uptime && <p className="text-slate-400">Up: {fmtUptime(hw.uptime)}</p>}
             {hw.logged_user && <p className="text-slate-400">User: {hw.logged_user}</p>}
             {seenAgo !== null && <p className="text-slate-500 mt-1">Last seen: {seenAgo < 1 ? 'just now' : `${seenAgo}m ago`}</p>}
@@ -204,6 +410,7 @@ export const Devices: React.FC = () => {
   const [typeFilter,   setTypeFilter]   = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [modal,        setModal]        = useState<Device | null | 'new'>(null);
+  const [transferDev,  setTransferDev]  = useState<Device | null>(null);
   const [delConf,      setDelConf]      = useState<string | null>(null);
   const [delId,        setDelId]        = useState<string | null>(null);
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
@@ -257,7 +464,6 @@ export const Devices: React.FC = () => {
 
   const types = ['All', ...Array.from(new Set(devices.map(d => d.device_type)))];
 
-  // Download agent
   const downloadAgent = () => {
     const a = document.createElement('a');
     a.href = '/DeviceManager-Setup.exe';
@@ -294,7 +500,7 @@ export const Devices: React.FC = () => {
         </div>
       </div>
 
-      {/* Agent install banner (shown when no agents linked) */}
+      {/* Agent install banner */}
       {!loading && devices.filter(d => !!d.agent_token).length === 0 && (
         <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-5 py-4 flex items-center justify-between gap-4">
           <div>
@@ -312,7 +518,7 @@ export const Devices: React.FC = () => {
       <div className="flex flex-wrap gap-3">
         <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 flex-1 min-w-48">
           <Search className="w-4 h-4 text-slate-400 shrink-0" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search devices…"
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, IP, serial…"
             className="bg-transparent text-sm text-white placeholder-slate-500 outline-none flex-1" />
         </div>
         <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
@@ -343,7 +549,7 @@ export const Devices: React.FC = () => {
               <thead className="border-b border-slate-700">
                 <tr className="text-xs text-slate-400 font-medium">
                   <th className="w-8 px-2 py-3" />
-                  {['Device','Type','OS','Status','Agent','Assigned To','IP Address','Actions'].map(h => (
+                  {['Device','Type','OS','Serial No.','Status','Agent','IP Address','Actions'].map(h => (
                     <th key={h} className="text-left px-4 py-3 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -357,7 +563,6 @@ export const Devices: React.FC = () => {
                   return (
                     <React.Fragment key={d.id}>
                       <tr className={`hover:bg-slate-700/30 border-b border-slate-700/50 transition ${isExpanded ? 'bg-slate-700/20' : ''}`}>
-                        {/* Expand toggle */}
                         <td className="px-2 py-3 text-center">
                           {hasAgent && (
                             <button onClick={() => toggleExpand(d.id)} className="text-slate-500 hover:text-slate-300 transition">
@@ -368,6 +573,9 @@ export const Devices: React.FC = () => {
                         <td className="px-4 py-3 font-medium text-white whitespace-nowrap">{d.device_name}</td>
                         <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{d.device_type}</td>
                         <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{d.os ?? '—'}</td>
+                        <td className="px-4 py-3 text-slate-400 font-mono text-xs whitespace-nowrap">
+                          {d.serial_number ?? '—'}
+                        </td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-full border ${STATUS_COLORS[d.status] ?? STATUS_COLORS.Offline}`}>
                             {d.status}
@@ -387,10 +595,17 @@ export const Devices: React.FC = () => {
                             <span className="text-xs text-slate-600">—</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{d.assigned_to ?? '—'}</td>
                         <td className="px-4 py-3 text-slate-400 font-mono text-xs whitespace-nowrap">{d.ip_address ?? '—'}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1">
+                            {/* Send File button — only for agent-linked devices */}
+                            {hasAgent && (
+                              <button onClick={() => setTransferDev(d)}
+                                title="Send file to device"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition">
+                                <UploadCloud className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             <button onClick={() => setModal(d)} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition"><Pencil className="w-3.5 h-3.5" /></button>
                             {delConf === d.id ? (
                               <div className="flex gap-1">
@@ -405,7 +620,6 @@ export const Devices: React.FC = () => {
                           </div>
                         </td>
                       </tr>
-                      {/* Agent hardware expand row */}
                       {isExpanded && d.hardware && <HardwareRow d={d} />}
                     </React.Fragment>
                   );
@@ -416,8 +630,10 @@ export const Devices: React.FC = () => {
         )}
       </div>
 
-      {modal && modal !== 'new' && <Modal device={modal}  onClose={() => setModal(null)} onSaved={handleSaved} />}
-      {modal === 'new'            && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
+      {/* Modals */}
+      {modal && modal !== 'new' && <Modal device={modal} onClose={() => setModal(null)} onSaved={handleSaved} />}
+      {modal === 'new'           && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
+      {transferDev               && <FileTransferModal device={transferDev} onClose={() => setTransferDev(null)} />}
     </div>
   );
 };

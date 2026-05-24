@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -21,7 +23,6 @@ import (
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// Baked-in API URL — change before building
 const API_URL = "https://device-management-xi.vercel.app"
 
 type Config struct {
@@ -34,6 +35,13 @@ func configPath() string {
 		return filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceManager", "config.json")
 	}
 	return filepath.Join(os.TempDir(), "devicemanager_config.json")
+}
+
+func transferDir() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceManager", "Transfers")
+	}
+	return filepath.Join(os.TempDir(), "DeviceManager", "Transfers")
 }
 
 func loadConfig() (*Config, error) {
@@ -63,27 +71,57 @@ func saveConfig(cfg *Config) error {
 // ── System Info ───────────────────────────────────────────────────────────────
 
 type HardwareInfo struct {
-	Hostname    string   `json:"hostname"`
-	OS          string   `json:"os"`
-	OSVersion   string   `json:"os_version"`
-	OSBuild     string   `json:"os_build"`
-	KernelArch  string   `json:"kernel_arch"`
-	CPUBrand    string   `json:"cpu_brand"`
-	CPUCores    int      `json:"cpu_cores"`
-	CPUThreads  int      `json:"cpu_threads"`
-	CPUUsage    float64  `json:"cpu_usage"`
-	RAMTotal    uint64   `json:"ram_total"`
-	RAMUsed     uint64   `json:"ram_used"`
-	RAMFree     uint64   `json:"ram_free"`
-	DiskTotal   uint64   `json:"disk_total"`
-	DiskUsed    uint64   `json:"disk_used"`
-	DiskFree    uint64   `json:"disk_free"`
-	IPAddresses []string `json:"ip_addresses"`
-	MACAddress  string   `json:"mac_address"`
-	LoggedUser  string   `json:"logged_user"`
-	Uptime      uint64   `json:"uptime"`
-	BootTime    uint64   `json:"boot_time"`
-	Platform    string   `json:"platform"`
+	Hostname     string   `json:"hostname"`
+	OS           string   `json:"os"`
+	OSVersion    string   `json:"os_version"`
+	OSBuild      string   `json:"os_build"`
+	KernelArch   string   `json:"kernel_arch"`
+	CPUBrand     string   `json:"cpu_brand"`
+	CPUCores     int      `json:"cpu_cores"`
+	CPUThreads   int      `json:"cpu_threads"`
+	CPUUsage     float64  `json:"cpu_usage"`
+	RAMTotal     uint64   `json:"ram_total"`
+	RAMUsed      uint64   `json:"ram_used"`
+	RAMFree      uint64   `json:"ram_free"`
+	DiskTotal    uint64   `json:"disk_total"`
+	DiskUsed     uint64   `json:"disk_used"`
+	DiskFree     uint64   `json:"disk_free"`
+	IPAddresses  []string `json:"ip_addresses"`
+	MACAddress   string   `json:"mac_address"`
+	SerialNumber string   `json:"serial_number"`
+	LoggedUser   string   `json:"logged_user"`
+	Uptime       uint64   `json:"uptime"`
+	BootTime     uint64   `json:"boot_time"`
+	Platform     string   `json:"platform"`
+}
+
+// getSerialNumber reads the BIOS serial number on Windows via wmic
+func getSerialNumber() string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	out, err := exec.Command("wmic", "bios", "get", "serialnumber", "/value").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(strings.ReplaceAll(line, "\r", ""))
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "serialnumber=") {
+			val := strings.TrimSpace(line[13:])
+			// Skip placeholder values set by OEMs
+			if val == "" ||
+				strings.EqualFold(val, "To be filled by O.E.M.") ||
+				strings.EqualFold(val, "Default string") ||
+				strings.EqualFold(val, "System Serial Number") ||
+				strings.EqualFold(val, "None") ||
+				val == "0" {
+				return ""
+			}
+			return val
+		}
+	}
+	return ""
 }
 
 func collectHardware() HardwareInfo {
@@ -100,6 +138,9 @@ func collectHardware() HardwareInfo {
 		h.BootTime   = info.BootTime
 		h.Platform   = info.OS
 	}
+
+	// Serial number (Windows only via BIOS WMI)
+	h.SerialNumber = getSerialNumber()
 
 	// Users
 	if users, err := host.Users(); err == nil && len(users) > 0 {
@@ -123,7 +164,7 @@ func collectHardware() HardwareInfo {
 		h.RAMFree  = memInfo.Available
 	}
 
-	// Disk (aggregate all physical drives on root/C:)
+	// Disk (aggregate all physical drives)
 	parts, _ := disk.Partitions(false)
 	for _, p := range parts {
 		if u, err := disk.Usage(p.Mountpoint); err == nil {
@@ -133,32 +174,42 @@ func collectHardware() HardwareInfo {
 		}
 	}
 
-	// Network
+	// Network — collect IPs, prefer IPv4, skip loopback + link-local
 	ifaces, _ := net.Interfaces()
-	var ips []string
+	var ips4, ips6 []string
 	for _, iface := range ifaces {
-		if iface.Name == "lo" || iface.Name == "lo0" {
+		name := strings.ToLower(iface.Name)
+		if name == "lo" || name == "lo0" || strings.HasPrefix(name, "loopback") {
 			continue
 		}
-		if h.MACAddress == "" && iface.HardwareAddr != "" && iface.HardwareAddr != "00:00:00:00:00:00" {
+		// Pick first non-empty, non-zero MAC
+		if h.MACAddress == "" &&
+			iface.HardwareAddr != "" &&
+			iface.HardwareAddr != "00:00:00:00:00:00" {
 			h.MACAddress = iface.HardwareAddr
 		}
 		for _, addr := range iface.Addrs {
 			ip := addr.Addr
+			// Strip CIDR prefix
+			if idx := strings.Index(ip, "/"); idx != -1 {
+				ip = ip[:idx]
+			}
 			if ip == "" || ip == "127.0.0.1" || ip == "::1" {
 				continue
 			}
-			// Strip CIDR
-			for i, c := range ip {
-				if c == '/' {
-					ip = ip[:i]
-					break
-				}
+			// Skip IPv6 link-local (fe80::...)
+			if strings.HasPrefix(strings.ToLower(ip), "fe80:") {
+				continue
 			}
-			ips = append(ips, ip)
+			if strings.Contains(ip, ":") {
+				ips6 = append(ips6, ip)
+			} else {
+				ips4 = append(ips4, ip)
+			}
 		}
 	}
-	h.IPAddresses = ips
+	// IPv4 first, then IPv6
+	h.IPAddresses = append(ips4, ips6...)
 
 	return h
 }
@@ -187,12 +238,34 @@ type HeartbeatRequest struct {
 	HW     HardwareInfo `json:"hardware"`
 }
 
+type PollTransfersRequest struct {
+	Action string `json:"action"`
+	Token  string `json:"token"`
+}
+
+type TransferItem struct {
+	ID       string `json:"id"`
+	Filename string `json:"filename"`
+	Data     string `json:"data"` // base64 data URL or raw base64
+}
+
+type PollTransfersResponse struct {
+	Transfers []TransferItem `json:"transfers"`
+}
+
+type AckTransferRequest struct {
+	Action     string `json:"action"`
+	Token      string `json:"token"`
+	TransferID string `json:"transfer_id"`
+}
+
 func postJSON(path string, payload interface{}) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.Post(API_URL+path, "application/json", bytes.NewReader(body))
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(API_URL+path, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +293,53 @@ func heartbeat(token string, hw HardwareInfo) error {
 	return err
 }
 
+// processTransfers polls for pending file transfers and saves them locally
+func processTransfers(token string) error {
+	data, err := postJSON("/api/agent", PollTransfersRequest{Action: "poll-transfers", Token: token})
+	if err != nil {
+		return err
+	}
+	var resp PollTransfersResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return err
+	}
+	if len(resp.Transfers) == 0 {
+		return nil
+	}
+
+	dir := transferDir()
+	os.MkdirAll(dir, 0755)
+
+	for _, t := range resp.Transfers {
+		// Strip "data:...;base64," prefix if present
+		b64 := t.Data
+		if idx := strings.Index(b64, ","); idx != -1 {
+			b64 = b64[idx+1:]
+		}
+		// Decode base64
+		decoded, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			// Try raw URL-safe encoding
+			decoded, err = base64.URLEncoding.DecodeString(b64)
+			if err != nil {
+				continue
+			}
+		}
+		// Save file
+		dest := filepath.Join(dir, t.Filename)
+		if err := os.WriteFile(dest, decoded, 0644); err != nil {
+			continue
+		}
+		// Acknowledge delivery
+		postJSON("/api/agent", AckTransferRequest{
+			Action:     "ack-transfer",
+			Token:      token,
+			TransferID: t.ID,
+		})
+	}
+	return nil
+}
+
 // ── Install (scheduled task setup) ───────────────────────────────────────────
 
 func installScheduledTask(exePath string) error {
@@ -227,7 +347,6 @@ func installScheduledTask(exePath string) error {
 		fmt.Println("  [skip] Scheduled task only supported on Windows")
 		return nil
 	}
-	// Copy exe to ProgramData so the task path is stable
 	destDir := filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceManager")
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return err
@@ -242,7 +361,6 @@ func installScheduledTask(exePath string) error {
 			return err
 		}
 	}
-	// Register scheduled task (runs every 5 min as SYSTEM)
 	cmd := exec.Command("schtasks",
 		"/create",
 		"/tn", "DeviceManagerAgent",
@@ -281,7 +399,7 @@ func main() {
 	case "--uninstall":
 		uninstall()
 
-	// ── Heartbeat (silent, called by scheduled task) ──────────────────────────
+	// ── Heartbeat (silent, called by scheduled task every 5 min) ─────────────
 	case "--heartbeat":
 		cfg, err := loadConfig()
 		if err != nil {
@@ -291,6 +409,8 @@ func main() {
 		if err := heartbeat(cfg.Token, hw); err != nil {
 			os.Exit(1)
 		}
+		// Poll and save any pending file transfers
+		processTransfers(cfg.Token)
 
 	// ── Install (double-clicked by user) ─────────────────────────────────────
 	default:
@@ -299,7 +419,7 @@ func main() {
 		fmt.Println("╚═══════════════════════════════════════╝")
 		fmt.Println()
 
-		// Check if already installed
+		// Already installed — just send a heartbeat update
 		if cfg, err := loadConfig(); err == nil && cfg.Token != "" {
 			fmt.Println("✓ Already registered. Running heartbeat update...")
 			hw := collectHardware()
@@ -308,6 +428,7 @@ func main() {
 			} else {
 				fmt.Println("✓ Device data updated successfully.")
 			}
+			processTransfers(cfg.Token)
 			fmt.Println("\nPress Enter to exit...")
 			fmt.Scanln()
 			return
@@ -315,10 +436,16 @@ func main() {
 
 		fmt.Println("Step 1/3  Collecting device information...")
 		hw := collectHardware()
-		fmt.Printf("         Hostname  : %s\n", hw.Hostname)
-		fmt.Printf("         OS        : %s %s\n", hw.OS, hw.OSVersion)
-		fmt.Printf("         CPU       : %s (%d cores)\n", hw.CPUBrand, hw.CPUCores)
-		fmt.Printf("         RAM       : %.1f GB\n", float64(hw.RAMTotal)/1073741824)
+		fmt.Printf("         Hostname      : %s\n", hw.Hostname)
+		fmt.Printf("         OS            : %s %s\n", hw.OS, hw.OSVersion)
+		fmt.Printf("         CPU           : %s (%d cores)\n", hw.CPUBrand, hw.CPUCores)
+		fmt.Printf("         RAM           : %.1f GB\n", float64(hw.RAMTotal)/1073741824)
+		if hw.SerialNumber != "" {
+			fmt.Printf("         Serial Number : %s\n", hw.SerialNumber)
+		}
+		if len(hw.IPAddresses) > 0 {
+			fmt.Printf("         IP Address    : %s\n", hw.IPAddresses[0])
+		}
 
 		fmt.Println()
 		fmt.Println("Step 2/3  Registering with Device Manager...")
@@ -345,7 +472,6 @@ func main() {
 		if err := installScheduledTask(exePath); err != nil {
 			fmt.Println("  ⚠ Could not create scheduled task:", err)
 			fmt.Println("  Run as Administrator for auto-reporting.")
-			fmt.Println("  You can still run this file manually to update data.")
 		} else {
 			fmt.Println("✓ Auto-reporting scheduled")
 		}
@@ -355,6 +481,8 @@ func main() {
 		fmt.Println("  Installation complete!")
 		fmt.Println("  This device is now visible in the")
 		fmt.Println("  Device Manager dashboard.")
+		fmt.Println("  Files sent from the dashboard will")
+		fmt.Printf("  be saved to: %s\n", transferDir())
 		fmt.Println("═══════════════════════════════════════")
 		fmt.Println()
 		fmt.Println("Press Enter to exit...")

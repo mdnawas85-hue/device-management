@@ -1,25 +1,26 @@
 export interface HardwareInfo {
-  hostname?:    string;
-  os?:          string;
-  os_version?:  string;
-  os_build?:    string;
-  kernel_arch?: string;
-  cpu_brand?:   string;
-  cpu_cores?:   number;
-  cpu_threads?: number;
-  cpu_usage?:   number;
-  ram_total?:   number;
-  ram_used?:    number;
-  ram_free?:    number;
-  disk_total?:  number;
-  disk_used?:   number;
-  disk_free?:   number;
-  ip_addresses?:string[];
-  mac_address?: string;
-  logged_user?: string;
-  uptime?:      number;
-  boot_time?:   number;
-  platform?:    string;
+  hostname?:     string;
+  os?:           string;
+  os_version?:   string;
+  os_build?:     string;
+  kernel_arch?:  string;
+  cpu_brand?:    string;
+  cpu_cores?:    number;
+  cpu_threads?:  number;
+  cpu_usage?:    number;
+  ram_total?:    number;
+  ram_used?:     number;
+  ram_free?:     number;
+  disk_total?:   number;
+  disk_used?:    number;
+  disk_free?:    number;
+  ip_addresses?: string[];
+  mac_address?:  string;
+  serial_number?: string;
+  logged_user?:  string;
+  uptime?:       number;
+  boot_time?:    number;
+  platform?:     string;
 }
 
 export interface Device {
@@ -47,4 +48,14 @@ export interface Device {
   hostname?:     string;
   last_seen?:    string | null;
   hardware?:     HardwareInfo | null;
+}
+
+export interface FileTransfer {
+  id:           string;
+  device_id:    string;
+  filename:     string;
+  size:         number;
+  status:       'pending' | 'delivered' | 'failed';
+  created_at:   string;
+  delivered_at: string | null;
 }
