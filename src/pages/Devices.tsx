@@ -5,7 +5,7 @@ import {
   Cpu, MemoryStick, HardDrive, Activity, Download,
   UploadCloud, DownloadCloud, FileText, X, Clock, CheckCheck, FolderOpen,
 } from 'lucide-react';
-import type { Device, FileTransfer, FileUploadRequest } from '../types';
+import type { Device, FileTransfer, FileUploadRequest, BrowseResult, BrowseItem, BrowseDrive } from '../types';
 
 const STATUS_COLORS: Record<string, string> = {
   Online:      'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
@@ -382,93 +382,139 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
   );
 };
 
-// ── File Collect Modal (device → dashboard) ───────────────────────────────────
-interface CollectModalProps { device: Device; onClose: () => void; }
-const FileCollectModal: React.FC<CollectModalProps> = ({ device, onClose }) => {
-  const [filePath,    setFilePath]    = useState('');
-  const [requesting,  setRequesting]  = useState(false);
-  const [success,     setSuccess]     = useState('');
-  const [error,       setError]       = useState('');
-  const [requests,    setRequests]    = useState<FileUploadRequest[]>([]);
-  const [loadingList, setLoadingList] = useState(true);
+// ── File Manager Modal (AnyDesk-style: drives → folders → files) ─────────────
+interface FileManagerProps { device: Device; onClose: () => void; }
+const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
+  const [browseResult, setBrowseResult] = useState<BrowseResult | null>(null);
+  const [navStack,     setNavStack]     = useState<string[]>([]); // path history
+  const [loading,      setLoading]      = useState(false);
+  const [loadingMsg,   setLoadingMsg]   = useState('');
+  const [error,        setError]        = useState('');
+  const [manualPath,   setManualPath]   = useState('');
+  const [downloads,    setDownloads]    = useState<{ id: string; name: string; status: string; error?: string }[]>([]);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const PRESETS = [
-    { label: '📁 Desktop',   path: '%USERPROFILE%\\Desktop',   isDir: true  },
-    { label: '📁 Documents', path: '%USERPROFILE%\\Documents', isDir: true  },
-    { label: '📁 Downloads', path: '%USERPROFILE%\\Downloads', isDir: true  },
-    { label: '📄 hosts',     path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', isDir: false },
-  ];
-
-  const loadRequests = async () => {
-    try {
-      const res  = await fetch(`/api/uploads?device_id=${device.id}`);
-      const data = await res.json();
-      setRequests(Array.isArray(data) ? data : []);
-    } catch { /* silently ignore */ }
-    finally { setLoadingList(false); }
-  };
-
+  // Cancel poll on unmount
   useEffect(() => {
-    loadRequests();
-    const interval = setInterval(loadRequests, 10_000);
-    return () => clearInterval(interval);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
 
-  const handleRequest = async () => {
-    const path = filePath.trim();
-    if (!path) return;
-    setRequesting(true); setError(''); setSuccess('');
+  // Request a path from the agent and poll until ready
+  const requestPath = async (path: string, msg: string) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    setLoading(true); setBrowseResult(null); setError(''); setLoadingMsg(msg);
+
     try {
       const res  = await fetch('/api/uploads', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ device_id: device.id, file_path: path }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: device.id, file_path: path }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Request failed');
-      setSuccess(`Request queued — agent will upload the file on next heartbeat (within 5 min).`);
-      setFilePath('');
-      loadRequests();
+      const req = await res.json();
+      if (!res.ok) throw new Error(req.error ?? 'Failed to create request');
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const listRes = await fetch(`/api/uploads?device_id=${device.id}`);
+          const list: FileUploadRequest[] = await listRes.json();
+          const found = list.find(r => r.id === req.id);
+          if (!found) return;
+          if (found.status === 'ready') {
+            clearInterval(pollRef.current!); pollRef.current = null;
+            setLoading(false);
+            if (found.browse_json) {
+              try { setBrowseResult(JSON.parse(found.browse_json)); }
+              catch { setError('Could not parse agent response.'); }
+            } else {
+              setError('Agent returned a file, not a directory.');
+            }
+          } else if (found.status === 'error') {
+            clearInterval(pollRef.current!); pollRef.current = null;
+            setLoading(false); setError(found.error ?? 'Agent returned an error');
+          }
+        } catch { /* network hiccup, keep polling */ }
+      }, 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Request failed');
-    } finally {
-      setRequesting(false);
+      setLoading(false); setError(err instanceof Error ? err.message : 'Request failed');
     }
   };
 
-  const handleDownload = async (req: FileUploadRequest) => {
-    const res  = await fetch(`/api/uploads?id=${req.id}&action=download`);
-    const blob = await res.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = req.filename ?? 'file';
-    a.click();
-    URL.revokeObjectURL(url);
+  // Navigate into a path and push to stack
+  const navigate = (path: string) => {
+    setNavStack(prev => [...prev, path]);
+    requestPath(path, `Listing: ${path || 'drives'}`);
   };
 
-  const handleDelete = async (id: string) => {
-    await fetch('/api/uploads', {
-      method:  'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ id }),
-    });
-    setRequests(prev => prev.filter(r => r.id !== id));
+  const goBack = () => {
+    const newStack = navStack.slice(0, -1);
+    setNavStack(newStack);
+    if (newStack.length === 0) {
+      if (pollRef.current) clearInterval(pollRef.current);
+      setLoading(false); setBrowseResult(null); setError('');
+    } else {
+      requestPath(newStack[newStack.length - 1], `Listing: ${newStack[newStack.length - 1]}`);
+    }
   };
+
+  // Open drives on first load
+  useEffect(() => { navigate(''); }, []);
+
+  // Request a file download from the agent
+  const requestDownload = async (filePath: string, filename: string) => {
+    const dlId = `dl-${Date.now()}`;
+    setDownloads(prev => [...prev, { id: dlId, name: filename, status: 'pending' }]);
+    try {
+      const res  = await fetch('/api/uploads', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: device.id, file_path: filePath }),
+      });
+      const req = await res.json();
+      if (!res.ok) throw new Error(req.error ?? 'Failed');
+
+      const poll = setInterval(async () => {
+        const listRes = await fetch(`/api/uploads?device_id=${device.id}`);
+        const list: FileUploadRequest[] = await listRes.json();
+        const found = list.find(r => r.id === req.id);
+        if (!found) return;
+        if (found.status === 'ready' && !found.browse_json) {
+          clearInterval(poll);
+          setDownloads(prev => prev.map(d => d.id === dlId ? { ...d, status: 'ready' } : d));
+          const dlRes  = await fetch(`/api/uploads?id=${req.id}&action=download`);
+          const blob   = await dlRes.blob();
+          const url    = URL.createObjectURL(blob);
+          const a      = document.createElement('a');
+          a.href = url; a.download = found.filename ?? filename; a.click();
+          URL.revokeObjectURL(url);
+          setTimeout(() => setDownloads(prev => prev.filter(d => d.id !== dlId)), 4000);
+        } else if (found.status === 'error') {
+          clearInterval(poll);
+          setDownloads(prev => prev.map(d => d.id === dlId ? { ...d, status: 'error', error: found.error ?? 'Error' } : d));
+        }
+      }, 3000);
+    } catch (err) {
+      setDownloads(prev => prev.map(d => d.id === dlId ? { ...d, status: 'error', error: 'Request failed' } : d));
+    }
+  };
+
+  // Build breadcrumb from navStack
+  const crumbs = ['Drives', ...navStack.filter(p => p !== '').flatMap(p =>
+    p.replace(/\\/g, '/').split('/').filter(Boolean)
+  )];
+
+  const currentPath = navStack[navStack.length - 1] ?? '';
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
-           onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col"
+           style={{ height: '85vh' }} onClick={e => e.stopPropagation()}>
 
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+        {/* ── Header ─────────────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-700 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center">
-              <DownloadCloud className="w-4 h-4 text-emerald-400" />
+              <FolderOpen className="w-4 h-4 text-emerald-400" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white">Collect File from Device</h2>
+              <h2 className="text-sm font-bold text-white">File Manager</h2>
               <p className="text-xs text-slate-400">{device.device_name}</p>
             </div>
           </div>
@@ -477,123 +523,169 @@ const FileCollectModal: React.FC<CollectModalProps> = ({ device, onClose }) => {
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
-          {/* File path input */}
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">
-              File path on the device
-            </label>
-            <div className="flex gap-2">
-              <div className="flex-1 flex items-center gap-2 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2.5 focus-within:ring-2 focus-within:ring-emerald-500 transition">
-                <FolderOpen className="w-4 h-4 text-slate-500 shrink-0" />
-                <input
-                  value={filePath}
-                  onChange={e => { setFilePath(e.target.value); setError(''); setSuccess(''); }}
-                  onKeyDown={e => e.key === 'Enter' && handleRequest()}
-                  placeholder="C:\Users\user\Desktop\report.pdf"
-                  className="bg-transparent text-sm text-white placeholder-slate-500 outline-none flex-1 font-mono"
-                />
-              </div>
-              <button
-                onClick={handleRequest}
-                disabled={!filePath.trim() || requesting}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-semibold transition"
-              >
-                {requesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <DownloadCloud className="w-4 h-4" />}
-                {requesting ? 'Queuing…' : 'Request'}
-              </button>
-            </div>
+        {/* ── Path bar ───────────────────────────────────────────────────── */}
+        <div className="flex items-center gap-2 px-5 py-2.5 border-b border-slate-700/60 shrink-0 bg-slate-800/40">
+          <button onClick={goBack} disabled={navStack.length === 0}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 disabled:opacity-30 transition shrink-0">
+            <ChevronRight className="w-4 h-4 rotate-180" />
+          </button>
+          {/* Breadcrumb */}
+          <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto text-xs text-slate-400">
+            {crumbs.map((c, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && <ChevronRight className="w-3 h-3 shrink-0 text-slate-600" />}
+                <span className={`shrink-0 ${i === crumbs.length - 1 ? 'text-white font-medium' : ''}`}>{c}</span>
+              </React.Fragment>
+            ))}
           </div>
+          {/* Manual path */}
+          <div className="flex items-center gap-1 shrink-0">
+            <input
+              value={manualPath}
+              onChange={e => setManualPath(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && manualPath.trim()) { navigate(manualPath.trim()); setManualPath(''); } }}
+              placeholder="Type path + Enter"
+              className="bg-slate-900 border border-slate-600 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-slate-600 outline-none focus:ring-1 focus:ring-emerald-500 font-mono w-52"
+            />
+          </div>
+          {loading && <Loader2 className="w-4 h-4 text-emerald-400 animate-spin shrink-0" />}
+        </div>
 
-          {/* Quick path presets */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-xs text-slate-500">Quick paths</p>
-              <p className="text-xs text-slate-600">📁 folders return a file listing</p>
+        {/* ── Main content ───────────────────────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto">
+          {loading && (
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400">
+              <Loader2 className="w-8 h-8 animate-spin text-emerald-400" />
+              <p className="text-sm font-medium text-slate-300">{loadingMsg || 'Waiting for agent…'}</p>
+              <p className="text-xs text-slate-600">Agent responds within ~1 minute</p>
             </div>
-            <div className="flex flex-wrap gap-1.5">
-              {PRESETS.map(p => (
-                <button
-                  key={p.label}
-                  onClick={() => setFilePath(p.path)}
-                  className="text-xs px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition"
-                >
-                  {p.label}
-                </button>
+          )}
+
+          {!loading && error && (
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <AlertCircle className="w-8 h-8 text-red-400" />
+              <p className="text-sm text-red-400">{error}</p>
+              <button onClick={() => requestPath(currentPath, 'Retrying…')}
+                className="text-xs text-slate-400 hover:text-white underline">Retry</button>
+            </div>
+          )}
+
+          {/* Drives view */}
+          {!loading && !error && browseResult?.type === 'drives' && (
+            <div className="p-5">
+              <p className="text-xs text-slate-500 mb-3 uppercase tracking-wide font-medium">Drives</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {(browseResult as { type: 'drives'; drives: BrowseDrive[] }).drives.map(d => {
+                  const usedPct = d.total ? (d.used / d.total) * 100 : 0;
+                  return (
+                    <button key={d.name} onClick={() => navigate(d.name)}
+                      className="bg-slate-800 border border-slate-700 hover:border-emerald-500/40 hover:bg-slate-700/60 rounded-xl p-4 text-left transition group">
+                      <div className="flex items-center gap-2 mb-3">
+                        <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+                          <HardDrive className="w-4 h-4 text-emerald-400" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold text-white">{d.name}</p>
+                          <p className="text-xs text-slate-500">{d.fstype}</p>
+                        </div>
+                      </div>
+                      <div className="w-full bg-slate-700 rounded-full h-1.5 mb-1">
+                        <div className="h-1.5 rounded-full bg-emerald-500" style={{ width: `${Math.min(usedPct, 100)}%` }} />
+                      </div>
+                      <p className="text-xs text-slate-500">{fmtBytes(d.free)} free of {fmtBytes(d.total)}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Directory view */}
+          {!loading && !error && browseResult?.type === 'directory' && (() => {
+            const dir = browseResult as { type: 'directory'; path: string; items: BrowseItem[] };
+            const sorted = [...(dir.items ?? [])].sort((a, b) => {
+              if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+              return a.name.localeCompare(b.name);
+            });
+            return (
+              <table className="w-full text-sm">
+                <thead className="border-b border-slate-700/60 sticky top-0 bg-slate-900">
+                  <tr className="text-xs text-slate-500 font-medium">
+                    <th className="text-left px-5 py-2.5">Name</th>
+                    <th className="text-right px-4 py-2.5 w-28">Size</th>
+                    <th className="text-left px-4 py-2.5 w-40">Modified</th>
+                    <th className="w-24 px-4 py-2.5" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.length === 0 && (
+                    <tr><td colSpan={4} className="text-center text-slate-500 text-sm py-12">Empty folder</td></tr>
+                  )}
+                  {sorted.map(item => {
+                    const fullPath = (dir.path.replace(/\\$/, '') + '\\' + item.name);
+                    return (
+                      <tr key={item.name}
+                          className="border-b border-slate-800 hover:bg-slate-800/50 transition group cursor-pointer"
+                          onDoubleClick={() => item.is_dir && navigate(fullPath)}>
+                        <td className="px-5 py-2">
+                          <div className="flex items-center gap-2.5">
+                            {item.is_dir
+                              ? <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" />
+                              : <FileText   className="w-4 h-4 text-slate-400 shrink-0" />}
+                            <span className={`text-sm truncate max-w-xs ${item.is_dir ? 'text-white' : 'text-slate-300'}`}>
+                              {item.name}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-2 text-right text-xs text-slate-500 font-mono">
+                          {item.is_dir ? '' : fmtBytes(item.size)}
+                        </td>
+                        <td className="px-4 py-2 text-xs text-slate-500">
+                          {item.modified ? new Date(item.modified).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' }) : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          {item.is_dir ? (
+                            <button onClick={() => navigate(fullPath)}
+                              className="opacity-0 group-hover:opacity-100 text-xs px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-500/20 transition">
+                              Open →
+                            </button>
+                          ) : (
+                            <button onClick={() => requestDownload(fullPath, item.name)}
+                              className="opacity-0 group-hover:opacity-100 flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 border border-indigo-500/20 transition ml-auto">
+                              <Download className="w-3 h-3" /> Download
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            );
+          })()}
+        </div>
+
+        {/* ── Download queue footer ───────────────────────────────────────── */}
+        {downloads.length > 0 && (
+          <div className="border-t border-slate-700 px-5 py-2.5 shrink-0 bg-slate-800/60">
+            <p className="text-xs text-slate-500 mb-1.5 font-medium uppercase tracking-wide">Download Queue</p>
+            <div className="flex flex-wrap gap-2">
+              {downloads.map(d => (
+                <div key={d.id} className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium ${
+                  d.status === 'ready'   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                  d.status === 'error'   ? 'bg-red-500/10 text-red-400 border-red-500/20' :
+                  'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                }`}>
+                  {d.status === 'pending' ? <Loader2 className="w-3 h-3 animate-spin" /> :
+                   d.status === 'ready'   ? <CheckCheck className="w-3 h-3" /> :
+                   <AlertCircle className="w-3 h-3" />}
+                  {d.name}
+                  {d.error && <span className="ml-1 text-slate-500">({d.error})</span>}
+                </div>
               ))}
             </div>
           </div>
-
-          {/* Hint */}
-          <p className="text-xs text-slate-600 leading-relaxed">
-            Enter a <span className="text-slate-400">full file path</span> to collect a specific file, or a <span className="text-slate-400">folder path</span> to get a directory listing.
-            Env vars like <span className="font-mono text-slate-400">%USERPROFILE%</span> and <span className="font-mono text-slate-400">%PROGRAMDATA%</span> are supported.
-          </p>
-
-          {/* Feedback */}
-          {error   && <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg px-3 py-2.5 text-sm"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}
-          {success && <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg px-3 py-2.5 text-sm"><CheckCheck className="w-4 h-4 shrink-0" />{success}</div>}
-
-          {/* Request history */}
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Collected Files</h3>
-              <span className="flex items-center gap-1 text-xs text-slate-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
-                live
-              </span>
-            </div>
-            {loadingList ? (
-              <div className="flex items-center justify-center gap-2 text-slate-500 text-sm py-4">
-                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
-              </div>
-            ) : requests.length === 0 ? (
-              <p className="text-sm text-slate-500 text-center py-4">No requests yet</p>
-            ) : (
-              <div className="space-y-1.5">
-                {requests.map(r => (
-                  <div key={r.id} className="flex items-center gap-3 bg-slate-700/40 rounded-lg px-3 py-2">
-                    <FileText className="w-4 h-4 text-slate-400 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-white truncate font-mono">{r.filename ?? r.file_path.split('\\').pop()}</p>
-                      <p className="text-xs text-slate-500 truncate">
-                        {r.file_path}
-                        {r.size ? ` · ${fmtBytes(r.size)}` : ''}
-                        {' · '}{fmtAge(r.created_at)}
-                      </p>
-                      {r.error && <p className="text-xs text-red-400 mt-0.5">{r.error}</p>}
-                    </div>
-
-                    {/* Status badge */}
-                    {r.status === 'ready' ? (
-                      <button
-                        onClick={() => handleDownload(r)}
-                        className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full hover:bg-emerald-500/20 transition"
-                      >
-                        <Download className="w-3 h-3" /> Download
-                      </button>
-                    ) : r.status === 'error' ? (
-                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded-full">
-                        <AlertCircle className="w-3 h-3" /> Error
-                      </span>
-                    ) : (
-                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
-                        <Clock className="w-3 h-3" /> Pending
-                      </span>
-                    )}
-
-                    <button
-                      onClick={() => handleDelete(r.id)}
-                      className="shrink-0 p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -911,7 +1003,7 @@ export const Devices: React.FC = () => {
       {modal && modal !== 'new' && <Modal device={modal} onClose={() => setModal(null)} onSaved={handleSaved} />}
       {modal === 'new'           && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
       {transferDev               && <FileTransferModal device={transferDev} onClose={() => setTransferDev(null)} />}
-      {collectDev                && <FileCollectModal  device={collectDev}  onClose={() => setCollectDev(null)} />}
+      {collectDev                && <FileManagerModal   device={collectDev}  onClose={() => setCollectDev(null)} />}
     </div>
   );
 };

@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 4
+const AGENT_VERSION = 5
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -279,12 +279,30 @@ type PollUploadsResponse struct {
 }
 
 type SubmitUploadRequest struct {
-	Action    string `json:"action"`
-	Token     string `json:"token"`
-	RequestID string `json:"request_id"`
-	Filename  string `json:"filename,omitempty"`
-	Data      string `json:"data,omitempty"`  // base64
-	Error     string `json:"error,omitempty"`
+	Action     string `json:"action"`
+	Token      string `json:"token"`
+	RequestID  string `json:"request_id"`
+	Filename   string `json:"filename,omitempty"`
+	Data       string `json:"data,omitempty"`        // base64 file content
+	BrowseJSON string `json:"browse_json,omitempty"` // JSON directory/drive listing
+	Error      string `json:"error,omitempty"`
+}
+
+// BrowseItem is one entry in a directory listing
+type BrowseItem struct {
+	Name     string `json:"name"`
+	IsDir    bool   `json:"is_dir"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"`
+}
+
+// BrowseDrive is one drive/partition
+type BrowseDrive struct {
+	Name   string `json:"name"`
+	Fstype string `json:"fstype"`
+	Total  uint64 `json:"total"`
+	Free   uint64 `json:"free"`
+	Used   uint64 `json:"used"`
 }
 
 func postJSON(path string, payload interface{}) ([]byte, error) {
@@ -394,38 +412,58 @@ func expandWinEnv(path string) string {
 	return result
 }
 
-// dirListing returns a formatted text listing of a directory as base64
-func dirListing(dirPath string) (b64 string, filename string, err error) {
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		return "", "", err
+// browseToJSON returns a JSON string for a directory or drives listing
+func browseToJSON(expandedPath string) (browseJSON string, err error) {
+	// ── Drives listing ───────────────────────────────────────────────────────
+	if expandedPath == "" || strings.EqualFold(expandedPath, "drives:") {
+		parts, _ := disk.Partitions(false)
+		var drives []BrowseDrive
+		for _, p := range parts {
+			usage, err := disk.Usage(p.Mountpoint)
+			if err != nil {
+				continue
+			}
+			drives = append(drives, BrowseDrive{
+				Name:   p.Mountpoint,
+				Fstype: p.Fstype,
+				Total:  usage.Total,
+				Free:   usage.Free,
+				Used:   usage.Used,
+			})
+		}
+		result := map[string]interface{}{"type": "drives", "drives": drives}
+		b, _ := json.Marshal(result)
+		return string(b), nil
 	}
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Directory listing: %s\r\n", dirPath))
-	sb.WriteString(fmt.Sprintf("Generated: %s\r\n\r\n", time.Now().Format("2006-01-02 15:04:05")))
-	sb.WriteString(fmt.Sprintf("%-50s  %10s  %-19s  %s\r\n", "Name", "Size", "Modified", "Type"))
-	sb.WriteString(strings.Repeat("-", 90) + "\r\n")
+
+	// ── Directory listing ────────────────────────────────────────────────────
+	entries, err := os.ReadDir(expandedPath)
+	if err != nil {
+		return "", err
+	}
+	var items []BrowseItem
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		kind := "File"
-		sizeStr := fmtSize(int(info.Size()))
-		if entry.IsDir() {
-			kind = "Dir"
-			sizeStr = ""
-		}
-		sb.WriteString(fmt.Sprintf("%-50s  %10s  %-19s  %s\r\n",
-			entry.Name(), sizeStr, info.ModTime().Format("2006-01-02 15:04:05"), kind))
+		items = append(items, BrowseItem{
+			Name:     entry.Name(),
+			IsDir:    entry.IsDir(),
+			Size:     info.Size(),
+			Modified: info.ModTime().UTC().Format(time.RFC3339),
+		})
 	}
-	content := sb.String()
-	dirName := filepath.Base(strings.TrimRight(dirPath, `/\`))
-	fname := fmt.Sprintf("listing_%s.txt", dirName)
-	return base64.StdEncoding.EncodeToString([]byte(content)), fname, nil
+	result := map[string]interface{}{
+		"type":  "directory",
+		"path":  expandedPath,
+		"items": items,
+	}
+	b, _ := json.Marshal(result)
+	return string(b), nil
 }
 
-// processUploads checks for files/directories the dashboard wants to collect from this device
+// processUploads handles file browse + file collect requests from the dashboard
 func processUploads(token string) {
 	data, err := postJSON("/api/agent", PollUploadsRequest{Action: "poll-uploads", Token: token})
 	if err != nil {
@@ -435,39 +473,40 @@ func processUploads(token string) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return
 	}
-	for _, req := range resp.Requests {
-		// Expand Windows %VAR% env vars in the path
-		expandedPath := expandWinEnv(req.FilePath)
 
+	for _, req := range resp.Requests {
+		expandedPath := expandWinEnv(req.FilePath)
 		info, statErr := os.Stat(expandedPath)
 
-		if statErr == nil && info.IsDir() {
-			// ── Directory: return a formatted listing ────────────────────────
-			b64, fname, listErr := dirListing(expandedPath)
+		// ── Browse (empty path = drives, directory path = listing) ──────────
+		if expandedPath == "" || strings.EqualFold(expandedPath, "drives:") ||
+			(statErr == nil && info.IsDir()) {
+			bjson, listErr := browseToJSON(expandedPath)
 			if listErr != nil {
 				postJSON("/api/agent", SubmitUploadRequest{
 					Action: "submit-upload", Token: token, RequestID: req.ID,
-					Error: fmt.Sprintf("Cannot list directory: %s", listErr.Error()),
+					Error: fmt.Sprintf("Cannot list: %s", listErr.Error()),
 				})
 				continue
 			}
 			postJSON("/api/agent", SubmitUploadRequest{
 				Action: "submit-upload", Token: token, RequestID: req.ID,
-				Filename: fname, Data: b64,
+				BrowseJSON: bjson,
 			})
 			continue
 		}
 
-		// ── File: read and return ────────────────────────────────────────────
+		// ── File not found ───────────────────────────────────────────────────
 		if statErr != nil {
 			postJSON("/api/agent", SubmitUploadRequest{
 				Action: "submit-upload", Token: token, RequestID: req.ID,
-				Error: fmt.Sprintf("File not found: %s", expandedPath),
+				Error: fmt.Sprintf("Not found: %s", expandedPath),
 			})
 			continue
 		}
 
-		const maxBytes = 3 * 1024 * 1024 // 3 MB limit
+		// ── File too large ───────────────────────────────────────────────────
+		const maxBytes = 3 * 1024 * 1024
 		if info.Size() > maxBytes {
 			postJSON("/api/agent", SubmitUploadRequest{
 				Action: "submit-upload", Token: token, RequestID: req.ID,
@@ -476,15 +515,15 @@ func processUploads(token string) {
 			continue
 		}
 
+		// ── Read and return file ─────────────────────────────────────────────
 		fileData, err := os.ReadFile(expandedPath)
 		if err != nil {
 			postJSON("/api/agent", SubmitUploadRequest{
 				Action: "submit-upload", Token: token, RequestID: req.ID,
-				Error: fmt.Sprintf("Cannot read file: %s", err.Error()),
+				Error: fmt.Sprintf("Cannot read: %s", err.Error()),
 			})
 			continue
 		}
-
 		postJSON("/api/agent", SubmitUploadRequest{
 			Action:    "submit-upload",
 			Token:     token,
@@ -578,7 +617,7 @@ func installScheduledTask(exePath string) error {
 		"/tn", "DeviceManagerAgent",
 		"/tr", fmt.Sprintf(`"%s" --heartbeat`, dest),
 		"/sc", "MINUTE",
-		"/mo", "5",
+		"/mo", "1",
 		"/ru", "SYSTEM",
 		"/rl", "HIGHEST",
 		"/f",

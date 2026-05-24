@@ -31,11 +31,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!device_id) return res.status(400).json({ error: 'device_id required' });
     const rows = await col
-      .find({ device_id: String(device_id) }, { projection: { data: 0 } })
+      .find({ device_id: String(device_id) }, { projection: { data: 0 } }) // exclude binary data
       .sort({ created_at: -1 })
-      .limit(30)
+      .limit(50)
       .toArray();
-    return res.json(rows);
+    return res.json(rows); // browse_json IS included (small JSON string)
   }
 
   // ── POST { device_id, file_path }  → create upload request ───────────────

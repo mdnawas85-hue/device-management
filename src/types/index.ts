@@ -68,6 +68,26 @@ export interface FileUploadRequest {
   size:         number | null;
   status:       'pending' | 'ready' | 'error';
   error:        string | null;
+  browse_json:  string | null; // JSON string for directory/drives listing
   created_at:   string;
   completed_at: string | null;
 }
+
+export interface BrowseItem {
+  name:     string;
+  is_dir:   boolean;
+  size:     number;
+  modified: string;
+}
+
+export interface BrowseDrive {
+  name:   string;
+  fstype: string;
+  total:  number;
+  free:   number;
+  used:   number;
+}
+
+export type BrowseResult =
+  | { type: 'drives';    drives: BrowseDrive[] }
+  | { type: 'directory'; path: string; items: BrowseItem[] };

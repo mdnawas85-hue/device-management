@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 
 // ── Bump this every time you build and deploy a new agent .exe ────────────────
 // Agents with a lower version will automatically download and replace themselves.
-const LATEST_AGENT_VERSION = 4;
+const LATEST_AGENT_VERSION = 5;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -155,11 +155,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ── SUBMIT UPLOAD — agent sends back the requested file ──────────────────
   if (action === 'submit-upload') {
-    const token     = body.token      as string;
-    const requestId = body.request_id as string;
-    const filename  = body.filename   as string | undefined;
-    const data      = body.data       as string | undefined;
-    const error     = body.error      as string | undefined;
+    const token      = body.token       as string;
+    const requestId  = body.request_id  as string;
+    const filename   = body.filename    as string | undefined;
+    const data       = body.data        as string | undefined;
+    const browseJson = body.browse_json as string | undefined;
+    const error      = body.error       as string | undefined;
     if (!token || !requestId) return res.status(400).json({ error: 'token and request_id required' });
 
     const device = await col.findOne({ agent_token: token });
@@ -171,11 +172,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     await db.collection('file_uploads').updateOne(
       { id: requestId, device_id: device.id },
-      { $set: {
-          ...(error
-            ? { status: 'error', error, completed_at: now }
-            : { status: 'ready', filename, data, size, error: null, completed_at: now }),
-      }},
+      { $set: error
+          ? { status: 'error',  error,  completed_at: now }
+          : browseJson
+            ? { status: 'ready', browse_json: browseJson, filename: null, data: null, size: null, error: null, completed_at: now }
+            : { status: 'ready', filename, data, size, browse_json: null, error: null, completed_at: now },
+      },
     );
     return res.json({ ok: true });
   }
