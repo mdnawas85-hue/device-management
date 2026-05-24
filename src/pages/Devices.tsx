@@ -393,10 +393,10 @@ const FileCollectModal: React.FC<CollectModalProps> = ({ device, onClose }) => {
   const [loadingList, setLoadingList] = useState(true);
 
   const PRESETS = [
-    { label: 'Desktop',   path: '%USERPROFILE%\\Desktop\\' },
-    { label: 'Documents', path: '%USERPROFILE%\\Documents\\' },
-    { label: 'Downloads', path: '%USERPROFILE%\\Downloads\\' },
-    { label: 'hosts',     path: 'C:\\Windows\\System32\\drivers\\etc\\hosts' },
+    { label: '📁 Desktop',   path: '%USERPROFILE%\\Desktop',   isDir: true  },
+    { label: '📁 Documents', path: '%USERPROFILE%\\Documents', isDir: true  },
+    { label: '📁 Downloads', path: '%USERPROFILE%\\Downloads', isDir: true  },
+    { label: '📄 hosts',     path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', isDir: false },
   ];
 
   const loadRequests = async () => {
@@ -507,19 +507,28 @@ const FileCollectModal: React.FC<CollectModalProps> = ({ device, onClose }) => {
 
           {/* Quick path presets */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Quick paths</p>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-xs text-slate-500">Quick paths</p>
+              <p className="text-xs text-slate-600">📁 folders return a file listing</p>
+            </div>
             <div className="flex flex-wrap gap-1.5">
               {PRESETS.map(p => (
                 <button
                   key={p.label}
                   onClick={() => setFilePath(p.path)}
-                  className="text-xs px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 font-mono transition"
+                  className="text-xs px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition"
                 >
                   {p.label}
                 </button>
               ))}
             </div>
           </div>
+
+          {/* Hint */}
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Enter a <span className="text-slate-400">full file path</span> to collect a specific file, or a <span className="text-slate-400">folder path</span> to get a directory listing.
+            Env vars like <span className="font-mono text-slate-400">%USERPROFILE%</span> and <span className="font-mono text-slate-400">%PROGRAMDATA%</span> are supported.
+          </p>
 
           {/* Feedback */}
           {error   && <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg px-3 py-2.5 text-sm"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}

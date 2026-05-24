@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 3
+const AGENT_VERSION = 4
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -374,7 +374,58 @@ func processTransfers(token string) {
 	}
 }
 
-// processUploads checks for files the dashboard wants to collect from this device
+// expandWinEnv expands Windows-style %VARNAME% environment variables in a path
+func expandWinEnv(path string) string {
+	result := path
+	for {
+		start := strings.Index(result, "%")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start+1:], "%")
+		if end == -1 {
+			break
+		}
+		end += start + 1
+		varName := result[start+1 : end]
+		varValue := os.Getenv(varName)
+		result = result[:start] + varValue + result[end+1:]
+	}
+	return result
+}
+
+// dirListing returns a formatted text listing of a directory as base64
+func dirListing(dirPath string) (b64 string, filename string, err error) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return "", "", err
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Directory listing: %s\r\n", dirPath))
+	sb.WriteString(fmt.Sprintf("Generated: %s\r\n\r\n", time.Now().Format("2006-01-02 15:04:05")))
+	sb.WriteString(fmt.Sprintf("%-50s  %10s  %-19s  %s\r\n", "Name", "Size", "Modified", "Type"))
+	sb.WriteString(strings.Repeat("-", 90) + "\r\n")
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		kind := "File"
+		sizeStr := fmtSize(int(info.Size()))
+		if entry.IsDir() {
+			kind = "Dir"
+			sizeStr = ""
+		}
+		sb.WriteString(fmt.Sprintf("%-50s  %10s  %-19s  %s\r\n",
+			entry.Name(), sizeStr, info.ModTime().Format("2006-01-02 15:04:05"), kind))
+	}
+	content := sb.String()
+	dirName := filepath.Base(strings.TrimRight(dirPath, `/\`))
+	fname := fmt.Sprintf("listing_%s.txt", dirName)
+	return base64.StdEncoding.EncodeToString([]byte(content)), fname, nil
+}
+
+// processUploads checks for files/directories the dashboard wants to collect from this device
 func processUploads(token string) {
 	data, err := postJSON("/api/agent", PollUploadsRequest{Action: "poll-uploads", Token: token})
 	if err != nil {
@@ -385,33 +436,62 @@ func processUploads(token string) {
 		return
 	}
 	for _, req := range resp.Requests {
-		submitErr := func() string {
-			fileData, err := os.ReadFile(req.FilePath)
-			if err != nil {
-				return fmt.Sprintf("Cannot read file: %s", err.Error())
+		// Expand Windows %VAR% env vars in the path
+		expandedPath := expandWinEnv(req.FilePath)
+
+		info, statErr := os.Stat(expandedPath)
+
+		if statErr == nil && info.IsDir() {
+			// ── Directory: return a formatted listing ────────────────────────
+			b64, fname, listErr := dirListing(expandedPath)
+			if listErr != nil {
+				postJSON("/api/agent", SubmitUploadRequest{
+					Action: "submit-upload", Token: token, RequestID: req.ID,
+					Error: fmt.Sprintf("Cannot list directory: %s", listErr.Error()),
+				})
+				continue
 			}
-			const maxBytes = 3 * 1024 * 1024 // 3 MB limit
-			if len(fileData) > maxBytes {
-				return fmt.Sprintf("File too large (%s). Maximum 3 MB.", fmtSize(len(fileData)))
-			}
-			b64 := base64.StdEncoding.EncodeToString(fileData)
 			postJSON("/api/agent", SubmitUploadRequest{
-				Action:    "submit-upload",
-				Token:     token,
-				RequestID: req.ID,
-				Filename:  filepath.Base(req.FilePath),
-				Data:      b64,
+				Action: "submit-upload", Token: token, RequestID: req.ID,
+				Filename: fname, Data: b64,
 			})
-			return ""
-		}()
-		if submitErr != "" {
-			postJSON("/api/agent", SubmitUploadRequest{
-				Action:    "submit-upload",
-				Token:     token,
-				RequestID: req.ID,
-				Error:     submitErr,
-			})
+			continue
 		}
+
+		// ── File: read and return ────────────────────────────────────────────
+		if statErr != nil {
+			postJSON("/api/agent", SubmitUploadRequest{
+				Action: "submit-upload", Token: token, RequestID: req.ID,
+				Error: fmt.Sprintf("File not found: %s", expandedPath),
+			})
+			continue
+		}
+
+		const maxBytes = 3 * 1024 * 1024 // 3 MB limit
+		if info.Size() > maxBytes {
+			postJSON("/api/agent", SubmitUploadRequest{
+				Action: "submit-upload", Token: token, RequestID: req.ID,
+				Error: fmt.Sprintf("File too large (%s). Maximum 3 MB.", fmtSize(int(info.Size()))),
+			})
+			continue
+		}
+
+		fileData, err := os.ReadFile(expandedPath)
+		if err != nil {
+			postJSON("/api/agent", SubmitUploadRequest{
+				Action: "submit-upload", Token: token, RequestID: req.ID,
+				Error: fmt.Sprintf("Cannot read file: %s", err.Error()),
+			})
+			continue
+		}
+
+		postJSON("/api/agent", SubmitUploadRequest{
+			Action:    "submit-upload",
+			Token:     token,
+			RequestID: req.ID,
+			Filename:  filepath.Base(expandedPath),
+			Data:      base64.StdEncoding.EncodeToString(fileData),
+		})
 	}
 }
 
