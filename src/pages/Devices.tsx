@@ -162,7 +162,12 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
     finally { setLoadingList(false); }
   };
 
-  useEffect(() => { loadTransfers(); }, []);
+  useEffect(() => {
+    loadTransfers();
+    // Auto-refresh every 10 s while modal is open so Pending → Delivered updates live
+    const interval = setInterval(loadTransfers, 10_000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0] ?? null;
@@ -329,7 +334,13 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
 
           {/* Transfer history */}
           <div>
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Transfer History</h3>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Transfer History</h3>
+              <span className="flex items-center gap-1 text-xs text-slate-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+                live
+              </span>
+            </div>
             {loadingList ? (
               <div className="flex items-center gap-2 text-slate-500 text-sm py-4 justify-center">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading…
