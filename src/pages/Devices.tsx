@@ -389,20 +389,29 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
   const [navStack,     setNavStack]     = useState<string[]>([]); // path history
   const [loading,      setLoading]      = useState(false);
   const [loadingMsg,   setLoadingMsg]   = useState('');
+  const [waitSecs,     setWaitSecs]     = useState(0);
+  const [timedOut,     setTimedOut]     = useState(false);
   const [error,        setError]        = useState('');
   const [manualPath,   setManualPath]   = useState('');
   const [downloads,    setDownloads]    = useState<{ id: string; name: string; status: string; error?: string }[]>([]);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const TIMEOUT_S  = 150; // 2.5 min — if no response by then, show instructions
 
-  // Cancel poll on unmount
+  // Cancel poll + timer on unmount
   useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => {
+      if (pollRef.current)  clearInterval(pollRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
   }, []);
 
   // Request a path from the agent and poll until ready
   const requestPath = async (path: string, msg: string) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    setLoading(true); setBrowseResult(null); setError(''); setLoadingMsg(msg);
+    if (pollRef.current)  clearInterval(pollRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+    setLoading(true); setBrowseResult(null); setError('');
+    setLoadingMsg(msg); setWaitSecs(0); setTimedOut(false);
 
     try {
       const res  = await fetch('/api/uploads', {
@@ -412,6 +421,18 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
       const req = await res.json();
       if (!res.ok) throw new Error(req.error ?? 'Failed to create request');
 
+      // Elapsed-seconds counter + timeout
+      let elapsed = 0;
+      timerRef.current = setInterval(() => {
+        elapsed += 1;
+        setWaitSecs(elapsed);
+        if (elapsed >= TIMEOUT_S) {
+          clearInterval(timerRef.current!); timerRef.current = null;
+          clearInterval(pollRef.current!);  pollRef.current  = null;
+          setLoading(false); setTimedOut(true);
+        }
+      }, 1000);
+
       pollRef.current = setInterval(async () => {
         try {
           const listRes = await fetch(`/api/uploads?device_id=${device.id}`);
@@ -419,8 +440,9 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
           const found = list.find(r => r.id === req.id);
           if (!found) return;
           if (found.status === 'ready') {
-            clearInterval(pollRef.current!); pollRef.current = null;
-            setLoading(false);
+            clearInterval(pollRef.current!);  pollRef.current  = null;
+            clearInterval(timerRef.current!); timerRef.current = null;
+            setLoading(false); setTimedOut(false);
             if (found.browse_json) {
               try { setBrowseResult(JSON.parse(found.browse_json)); }
               catch { setError('Could not parse agent response.'); }
@@ -428,7 +450,8 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
               setError('Agent returned a file, not a directory.');
             }
           } else if (found.status === 'error') {
-            clearInterval(pollRef.current!); pollRef.current = null;
+            clearInterval(pollRef.current!);  pollRef.current  = null;
+            clearInterval(timerRef.current!); timerRef.current = null;
             setLoading(false); setError(found.error ?? 'Agent returned an error');
           }
         } catch { /* network hiccup, keep polling */ }
@@ -553,11 +576,48 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
 
         {/* ── Main content ───────────────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto">
-          {loading && (
+          {loading && !timedOut && (
             <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400">
               <Loader2 className="w-8 h-8 animate-spin text-emerald-400" />
               <p className="text-sm font-medium text-slate-300">{loadingMsg || 'Waiting for agent…'}</p>
-              <p className="text-xs text-slate-600">Agent responds within ~1 minute</p>
+              <div className="flex flex-col items-center gap-1">
+                <p className="text-xs text-slate-500">
+                  Waiting {waitSecs}s · times out in {Math.max(0, TIMEOUT_S - waitSecs)}s
+                </p>
+                <div className="w-48 bg-slate-700 rounded-full h-1 overflow-hidden">
+                  <div className="h-1 rounded-full bg-emerald-500 transition-all duration-1000"
+                       style={{ width: `${(waitSecs / TIMEOUT_S) * 100}%` }} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Timeout — agent not responding */}
+          {timedOut && (
+            <div className="flex flex-col items-center justify-center h-full gap-4 px-8 text-center">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">
+                <Clock className="w-7 h-7 text-amber-400" />
+              </div>
+              <div>
+                <p className="text-base font-semibold text-white mb-1">Agent not responding</p>
+                <p className="text-sm text-slate-400">
+                  The scheduled task on <span className="text-white font-mono">{device.device_name}</span> is not running.
+                  The agent needs to be run once manually to set up auto-reporting.
+                </p>
+              </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 text-left w-full max-w-sm">
+                <p className="text-xs font-semibold text-slate-300 mb-2">Fix — do this on the device:</p>
+                <ol className="text-xs text-slate-400 space-y-1.5 list-decimal list-inside">
+                  <li>Open <span className="font-mono text-slate-300">C:\ProgramData\DeviceManager\</span></li>
+                  <li>Double-click <span className="font-mono text-slate-300">DeviceManagerAgent.exe</span></li>
+                  <li>Wait for "Device data updated" message</li>
+                  <li>Come back here — it works automatically after that</li>
+                </ol>
+              </div>
+              <button onClick={() => { setTimedOut(false); requestPath(currentPath, loadingMsg); }}
+                className="flex items-center gap-2 text-sm px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition">
+                <RefreshCw className="w-4 h-4" /> Try Again
+              </button>
             </div>
           )}
 
