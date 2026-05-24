@@ -136,6 +136,50 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
+  // ── POLL UPLOADS — agent checks for files the dashboard wants to collect ──
+  if (action === 'poll-uploads') {
+    const token = body.token as string;
+    if (!token) return res.status(400).json({ error: 'token is required' });
+
+    const device = await col.findOne({ agent_token: token });
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    const requests = await db.collection('file_uploads')
+      .find({ device_id: device.id, status: 'pending' })
+      .toArray();
+
+    return res.json({
+      requests: requests.map(r => ({ id: r.id, file_path: r.file_path })),
+    });
+  }
+
+  // ── SUBMIT UPLOAD — agent sends back the requested file ──────────────────
+  if (action === 'submit-upload') {
+    const token     = body.token      as string;
+    const requestId = body.request_id as string;
+    const filename  = body.filename   as string | undefined;
+    const data      = body.data       as string | undefined;
+    const error     = body.error      as string | undefined;
+    if (!token || !requestId) return res.status(400).json({ error: 'token and request_id required' });
+
+    const device = await col.findOne({ agent_token: token });
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+
+    const now  = new Date().toISOString();
+    const b64  = data?.includes(',') ? data.split(',')[1] : data;
+    const size = b64 ? Math.round(b64.length * 0.75) : null;
+
+    await db.collection('file_uploads').updateOne(
+      { id: requestId, device_id: device.id },
+      { $set: {
+          ...(error
+            ? { status: 'error', error, completed_at: now }
+            : { status: 'ready', filename, data, size, error: null, completed_at: now }),
+      }},
+    );
+    return res.json({ ok: true });
+  }
+
   // ── POLL TRANSFERS — agent checks for pending files to download ───────────
   if (action === 'poll-transfers') {
     const token = body.token as string;

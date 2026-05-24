@@ -59,3 +59,15 @@ export interface FileTransfer {
   created_at:   string;
   delivered_at: string | null;
 }
+
+export interface FileUploadRequest {
+  id:           string;
+  device_id:    string;
+  file_path:    string;
+  filename:     string | null;
+  size:         number | null;
+  status:       'pending' | 'ready' | 'error';
+  error:        string | null;
+  created_at:   string;
+  completed_at: string | null;
+}

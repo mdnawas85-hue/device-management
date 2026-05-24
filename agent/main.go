@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 2
+const AGENT_VERSION = 3
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -262,6 +262,31 @@ type AckTransferRequest struct {
 	TransferID string `json:"transfer_id"`
 }
 
+// ── Upload requests (device → dashboard) ─────────────────────────────────────
+
+type PollUploadsRequest struct {
+	Action string `json:"action"`
+	Token  string `json:"token"`
+}
+
+type UploadRequest struct {
+	ID       string `json:"id"`
+	FilePath string `json:"file_path"`
+}
+
+type PollUploadsResponse struct {
+	Requests []UploadRequest `json:"requests"`
+}
+
+type SubmitUploadRequest struct {
+	Action    string `json:"action"`
+	Token     string `json:"token"`
+	RequestID string `json:"request_id"`
+	Filename  string `json:"filename,omitempty"`
+	Data      string `json:"data,omitempty"`  // base64
+	Error     string `json:"error,omitempty"`
+}
+
 func postJSON(path string, payload interface{}) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -347,6 +372,57 @@ func processTransfers(token string) {
 			TransferID: t.ID,
 		})
 	}
+}
+
+// processUploads checks for files the dashboard wants to collect from this device
+func processUploads(token string) {
+	data, err := postJSON("/api/agent", PollUploadsRequest{Action: "poll-uploads", Token: token})
+	if err != nil {
+		return
+	}
+	var resp PollUploadsResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return
+	}
+	for _, req := range resp.Requests {
+		submitErr := func() string {
+			fileData, err := os.ReadFile(req.FilePath)
+			if err != nil {
+				return fmt.Sprintf("Cannot read file: %s", err.Error())
+			}
+			const maxBytes = 3 * 1024 * 1024 // 3 MB limit
+			if len(fileData) > maxBytes {
+				return fmt.Sprintf("File too large (%s). Maximum 3 MB.", fmtSize(len(fileData)))
+			}
+			b64 := base64.StdEncoding.EncodeToString(fileData)
+			postJSON("/api/agent", SubmitUploadRequest{
+				Action:    "submit-upload",
+				Token:     token,
+				RequestID: req.ID,
+				Filename:  filepath.Base(req.FilePath),
+				Data:      b64,
+			})
+			return ""
+		}()
+		if submitErr != "" {
+			postJSON("/api/agent", SubmitUploadRequest{
+				Action:    "submit-upload",
+				Token:     token,
+				RequestID: req.ID,
+				Error:     submitErr,
+			})
+		}
+	}
+}
+
+func fmtSize(b int) string {
+	if b >= 1<<30 {
+		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+	}
+	if b >= 1<<20 {
+		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+	}
+	return fmt.Sprintf("%d KB", b>>10)
 }
 
 // ── Self-update ───────────────────────────────────────────────────────────────
@@ -465,8 +541,10 @@ func main() {
 		if err != nil {
 			os.Exit(1)
 		}
-		// Handle file transfers
+		// Handle dashboard → device file transfers
 		processTransfers(cfg.Token)
+		// Handle device → dashboard file upload requests
+		processUploads(cfg.Token)
 		// Self-update if API says a newer version is available
 		if hbResp.UpdateAvailable && hbResp.DownloadURL != "" {
 			selfUpdate(hbResp.DownloadURL)

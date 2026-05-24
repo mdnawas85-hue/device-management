@@ -3,9 +3,9 @@ import {
   Monitor, Plus, Search, Pencil, Trash2, Loader2, RefreshCw,
   CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
   Cpu, MemoryStick, HardDrive, Activity, Download,
-  UploadCloud, FileText, X, Clock, CheckCheck,
+  UploadCloud, DownloadCloud, FileText, X, Clock, CheckCheck, FolderOpen,
 } from 'lucide-react';
-import type { Device, FileTransfer } from '../types';
+import type { Device, FileTransfer, FileUploadRequest } from '../types';
 
 const STATUS_COLORS: Record<string, string> = {
   Online:      'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
@@ -382,6 +382,214 @@ const FileTransferModal: React.FC<TransferModalProps> = ({ device, onClose }) =>
   );
 };
 
+// ── File Collect Modal (device → dashboard) ───────────────────────────────────
+interface CollectModalProps { device: Device; onClose: () => void; }
+const FileCollectModal: React.FC<CollectModalProps> = ({ device, onClose }) => {
+  const [filePath,    setFilePath]    = useState('');
+  const [requesting,  setRequesting]  = useState(false);
+  const [success,     setSuccess]     = useState('');
+  const [error,       setError]       = useState('');
+  const [requests,    setRequests]    = useState<FileUploadRequest[]>([]);
+  const [loadingList, setLoadingList] = useState(true);
+
+  const PRESETS = [
+    { label: 'Desktop',   path: '%USERPROFILE%\\Desktop\\' },
+    { label: 'Documents', path: '%USERPROFILE%\\Documents\\' },
+    { label: 'Downloads', path: '%USERPROFILE%\\Downloads\\' },
+    { label: 'hosts',     path: 'C:\\Windows\\System32\\drivers\\etc\\hosts' },
+  ];
+
+  const loadRequests = async () => {
+    try {
+      const res  = await fetch(`/api/uploads?device_id=${device.id}`);
+      const data = await res.json();
+      setRequests(Array.isArray(data) ? data : []);
+    } catch { /* silently ignore */ }
+    finally { setLoadingList(false); }
+  };
+
+  useEffect(() => {
+    loadRequests();
+    const interval = setInterval(loadRequests, 10_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRequest = async () => {
+    const path = filePath.trim();
+    if (!path) return;
+    setRequesting(true); setError(''); setSuccess('');
+    try {
+      const res  = await fetch('/api/uploads', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ device_id: device.id, file_path: path }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Request failed');
+      setSuccess(`Request queued — agent will upload the file on next heartbeat (within 5 min).`);
+      setFilePath('');
+      loadRequests();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Request failed');
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  const handleDownload = async (req: FileUploadRequest) => {
+    const res  = await fetch(`/api/uploads?id=${req.id}&action=download`);
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = req.filename ?? 'file';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDelete = async (id: string) => {
+    await fetch('/api/uploads', {
+      method:  'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ id }),
+    });
+    setRequests(prev => prev.filter(r => r.id !== id));
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+           onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center">
+              <DownloadCloud className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white">Collect File from Device</h2>
+              <p className="text-xs text-slate-400">{device.device_name}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* File path input */}
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
+              File path on the device
+            </label>
+            <div className="flex gap-2">
+              <div className="flex-1 flex items-center gap-2 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2.5 focus-within:ring-2 focus-within:ring-emerald-500 transition">
+                <FolderOpen className="w-4 h-4 text-slate-500 shrink-0" />
+                <input
+                  value={filePath}
+                  onChange={e => { setFilePath(e.target.value); setError(''); setSuccess(''); }}
+                  onKeyDown={e => e.key === 'Enter' && handleRequest()}
+                  placeholder="C:\Users\user\Desktop\report.pdf"
+                  className="bg-transparent text-sm text-white placeholder-slate-500 outline-none flex-1 font-mono"
+                />
+              </div>
+              <button
+                onClick={handleRequest}
+                disabled={!filePath.trim() || requesting}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-semibold transition"
+              >
+                {requesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <DownloadCloud className="w-4 h-4" />}
+                {requesting ? 'Queuing…' : 'Request'}
+              </button>
+            </div>
+          </div>
+
+          {/* Quick path presets */}
+          <div>
+            <p className="text-xs text-slate-500 mb-1.5">Quick paths</p>
+            <div className="flex flex-wrap gap-1.5">
+              {PRESETS.map(p => (
+                <button
+                  key={p.label}
+                  onClick={() => setFilePath(p.path)}
+                  className="text-xs px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 font-mono transition"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Feedback */}
+          {error   && <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg px-3 py-2.5 text-sm"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}
+          {success && <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg px-3 py-2.5 text-sm"><CheckCheck className="w-4 h-4 shrink-0" />{success}</div>}
+
+          {/* Request history */}
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Collected Files</h3>
+              <span className="flex items-center gap-1 text-xs text-slate-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+                live
+              </span>
+            </div>
+            {loadingList ? (
+              <div className="flex items-center justify-center gap-2 text-slate-500 text-sm py-4">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+              </div>
+            ) : requests.length === 0 ? (
+              <p className="text-sm text-slate-500 text-center py-4">No requests yet</p>
+            ) : (
+              <div className="space-y-1.5">
+                {requests.map(r => (
+                  <div key={r.id} className="flex items-center gap-3 bg-slate-700/40 rounded-lg px-3 py-2">
+                    <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-white truncate font-mono">{r.filename ?? r.file_path.split('\\').pop()}</p>
+                      <p className="text-xs text-slate-500 truncate">
+                        {r.file_path}
+                        {r.size ? ` · ${fmtBytes(r.size)}` : ''}
+                        {' · '}{fmtAge(r.created_at)}
+                      </p>
+                      {r.error && <p className="text-xs text-red-400 mt-0.5">{r.error}</p>}
+                    </div>
+
+                    {/* Status badge */}
+                    {r.status === 'ready' ? (
+                      <button
+                        onClick={() => handleDownload(r)}
+                        className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full hover:bg-emerald-500/20 transition"
+                      >
+                        <Download className="w-3 h-3" /> Download
+                      </button>
+                    ) : r.status === 'error' ? (
+                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded-full">
+                        <AlertCircle className="w-3 h-3" /> Error
+                      </span>
+                    ) : (
+                      <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
+                        <Clock className="w-3 h-3" /> Pending
+                      </span>
+                    )}
+
+                    <button
+                      onClick={() => handleDelete(r.id)}
+                      className="shrink-0 p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Agent Hardware expand row ─────────────────────────────────────────────────
 const HardwareRow: React.FC<{ d: Device }> = ({ d }) => {
   const hw = d.hardware;
@@ -462,6 +670,7 @@ export const Devices: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('All');
   const [modal,        setModal]        = useState<Device | null | 'new'>(null);
   const [transferDev,  setTransferDev]  = useState<Device | null>(null);
+  const [collectDev,   setCollectDev]   = useState<Device | null>(null);
   const [delConf,      setDelConf]      = useState<string | null>(null);
   const [delId,        setDelId]        = useState<string | null>(null);
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
@@ -649,12 +858,20 @@ export const Devices: React.FC = () => {
                         <td className="px-4 py-3 text-slate-400 font-mono text-xs whitespace-nowrap">{d.ip_address ?? '—'}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1">
-                            {/* Send File button — only for agent-linked devices */}
+                            {/* Send file → device */}
                             {hasAgent && (
                               <button onClick={() => setTransferDev(d)}
                                 title="Send file to device"
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition">
                                 <UploadCloud className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {/* Collect file ← device */}
+                            {hasAgent && (
+                              <button onClick={() => setCollectDev(d)}
+                                title="Collect file from device"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition">
+                                <DownloadCloud className="w-3.5 h-3.5" />
                               </button>
                             )}
                             <button onClick={() => setModal(d)} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition"><Pencil className="w-3.5 h-3.5" /></button>
@@ -685,6 +902,7 @@ export const Devices: React.FC = () => {
       {modal && modal !== 'new' && <Modal device={modal} onClose={() => setModal(null)} onSaved={handleSaved} />}
       {modal === 'new'           && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
       {transferDev               && <FileTransferModal device={transferDev} onClose={() => setTransferDev(null)} />}
+      {collectDev                && <FileCollectModal  device={collectDev}  onClose={() => setCollectDev(null)} />}
     </div>
   );
 };
