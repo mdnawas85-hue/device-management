@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 5
+const AGENT_VERSION = 6
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -598,6 +598,7 @@ func installScheduledTask(exePath string) error {
 		fmt.Println("  [skip] Scheduled task only supported on Windows")
 		return nil
 	}
+
 	destDir := agentDir()
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return err
@@ -612,17 +613,47 @@ func installScheduledTask(exePath string) error {
 			return err
 		}
 	}
-	cmd := exec.Command("schtasks",
-		"/create",
-		"/tn", "DeviceManagerAgent",
-		"/tr", fmt.Sprintf(`"%s" --heartbeat`, dest),
-		"/sc", "MINUTE",
-		"/mo", "1",
-		"/ru", "SYSTEM",
-		"/rl", "HIGHEST",
-		"/f",
+
+	taskCmd := fmt.Sprintf(`"%s" --heartbeat`, dest)
+
+	// ── Attempt 1: SYSTEM-level task (requires admin, best option) ───────────
+	err := exec.Command("schtasks",
+		"/create", "/tn", "DeviceManagerAgent",
+		"/tr", taskCmd,
+		"/sc", "MINUTE", "/mo", "1",
+		"/ru", "SYSTEM", "/rl", "HIGHEST", "/f",
+	).Run()
+	if err == nil {
+		fmt.Println("✓ Auto-reporting scheduled (SYSTEM, every 1 min)")
+		return nil
+	}
+
+	// ── Attempt 2: User-level task (no admin needed) ─────────────────────────
+	err = exec.Command("schtasks",
+		"/create", "/tn", "DeviceManagerAgent",
+		"/tr", taskCmd,
+		"/sc", "MINUTE", "/mo", "1", "/f",
+	).Run()
+	if err == nil {
+		fmt.Println("✓ Auto-reporting scheduled (current user, every 1 min)")
+		return nil
+	}
+
+	// ── Attempt 3: Startup folder (no admin, runs at each login) ────────────
+	startupDir := filepath.Join(
+		os.Getenv("APPDATA"),
+		"Microsoft", "Windows", "Start Menu", "Programs", "Startup",
 	)
-	return cmd.Run()
+	if mkErr := os.MkdirAll(startupDir, 0755); mkErr == nil {
+		batPath := filepath.Join(startupDir, "DeviceManagerAgent.bat")
+		batContent := fmt.Sprintf("@echo off\r\nstart \"\" /min \"%s\" --heartbeat\r\n", dest)
+		if writeErr := os.WriteFile(batPath, []byte(batContent), 0755); writeErr == nil {
+			fmt.Println("✓ Auto-reporting on startup (runs at login — no admin access)")
+			return nil
+		}
+	}
+
+	return fmt.Errorf("could not register auto-reporting (try running as Administrator)")
 }
 
 func uninstall() {
