@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { supabase, SUPABASE_CONFIGURED } from '../lib/supabase';
 
 export type Role = 'super_admin' | 'admin' | 'viewer' | 'custom' | null;
 
@@ -37,6 +37,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
+    // If Supabase is not configured, bypass auth and show dashboard directly
+    if (!SUPABASE_CONFIGURED) {
+      setLoading(false);
+      // Create a minimal fake session so the app renders
+      setSession({ user: { id: 'local', email: 'admin@local', user_metadata: { role: 'super_admin' } } } as unknown as Session);
+      setRole('super_admin');
+      return;
+    }
+
     supabase.auth.getSession().then(({ data }) => {
       applySession(data.session);
       setLoading(false);

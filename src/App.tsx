@@ -21,25 +21,25 @@ const AppShell: React.FC = () => {
   if (!session) return <LoginPage />;
 
   return (
-    <BrowserRouter>
-      <div className="flex min-h-screen bg-slate-900">
-        <Sidebar />
-        <main className="flex-1 overflow-y-auto">
-          <Routes>
-            <Route path="/"        element={<Dashboard />} />
-            <Route path="/devices" element={<Devices />} />
-            <Route path="*"        element={<Navigate to="/" replace />} />
-          </Routes>
-        </main>
-      </div>
-    </BrowserRouter>
+    <div className="flex min-h-screen bg-slate-900">
+      <Sidebar />
+      <main className="flex-1 overflow-y-auto">
+        <Routes>
+          <Route path="/"        element={<Dashboard />} />
+          <Route path="/devices" element={<Devices />} />
+          <Route path="*"        element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+    </div>
   );
 };
 
 export default function App() {
   return (
-    <AuthProvider>
-      <AppShell />
-    </AuthProvider>
+    <BrowserRouter>
+      <AuthProvider>
+        <AppShell />
+      </AuthProvider>
+    </BrowserRouter>
   );
 }
