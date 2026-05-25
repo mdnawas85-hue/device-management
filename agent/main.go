@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 10
+const AGENT_VERSION = 11
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -267,59 +267,133 @@ func markSoftwareCollected() {
 //   - List<T> instead of $r+=: O(1) appends (avoids O(n²) slowdown for 100+ apps)
 //   - UTF-8 output encoding: handles international software names correctly
 //   - 20-second goroutine timeout: agent process never hangs
+// writeLog appends a timestamped line to DeviceManager_log.txt in the agent dir.
+// The user (or admin) can read this file to diagnose silent failures.
+func writeLog(msg string) {
+	logPath := filepath.Join(agentDir(), "DeviceManager_log.txt")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
+}
+
+// encodePS converts a PowerShell script string to UTF-16LE base64 so it can be
+// passed via -EncodedCommand. This avoids all shell quoting / escaping problems.
+func encodePS(script string) string {
+	runes := []rune(script)
+	b := make([]byte, len(runes)*2)
+	for i, r := range runes {
+		b[i*2] = byte(r)
+		b[i*2+1] = byte(r >> 8)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// psExe returns the full path to powershell.exe.
+// The SYSTEM account (used by scheduled tasks) may have a minimal PATH, so
+// we resolve the path explicitly rather than relying on PATH lookup.
+func psExe() string {
+	sysRoot := os.Getenv("SystemRoot")
+	if sysRoot == "" {
+		sysRoot = `C:\Windows`
+	}
+	p := filepath.Join(sysRoot, `System32\WindowsPowerShell\v1.0\powershell.exe`)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return "powershell" // fallback — works when PATH is set correctly
+}
+
 func collectInstalledSoftware() []SoftwareItem {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
 
-	type res struct{ items []SoftwareItem }
+	writeLog("software: starting collection")
+
+	type res struct {
+		items []SoftwareItem
+		errMsg string
+	}
 	ch := make(chan res, 1)
 
 	go func() {
-		// List<object> gives O(1) .Add() — avoids the O(n²) $r+= array copy pattern
-		// that makes PowerShell hang on machines with 150+ installed apps.
-		script := `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;` +
+		// Build script. List<object> gives O(1) .Add() — avoids the O(n²) $r+=
+		// array copy pattern that hangs PowerShell on machines with 150+ apps.
+		// -EncodedCommand (UTF-16LE base64) avoids all shell quoting issues.
+		script :=
+			`[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;` +
 			`$l=[System.Collections.Generic.List[object]]::new();$s=@{};` +
-			`foreach($p in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',` +
-			`'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')){` +
-			`try{Get-ItemProperty $p -EA 0|?{$_.DisplayName}|%{` +
+			`foreach($p in @(` +
+			`'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',` +
+			`'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'` +
+			`)){try{Get-ItemProperty $p -EA 0|?{$_.DisplayName}|%{` +
 			`$n=$_.DisplayName.Trim();if(!$s[$n]){$s[$n]=1;` +
-			`$l.Add([PSCustomObject]@{name=$n;` +
+			`$l.Add([PSCustomObject]@{` +
+			`name=$n;` +
 			`version=$(if($_.DisplayVersion){$_.DisplayVersion.Trim()}else{''});` +
 			`publisher=$(if($_.Publisher){$_.Publisher.Trim()}else{''});` +
-			`install_date=$(if($_.InstallDate){$_.InstallDate.Trim()}else{''})})}}}catch{}}` +
-			`ConvertTo-Json -InputObject @($l|Sort-Object name) -Compress`
+			`install_date=$(if($_.InstallDate){$_.InstallDate.Trim()}else{''})` +
+			`})}}}catch{}}` +
+			`ConvertTo-Json -InputObject @($l|Sort-Object name) -Compress -Depth 2`
 
-		out, err := exec.Command(
-			"powershell",
-			"-ExecutionPolicy", "Bypass", // works even on restricted corporate machines
+		cmd := exec.Command(
+			psExe(),
+			"-ExecutionPolicy", "Bypass",
 			"-NonInteractive", "-NoProfile",
-			"-Command", script,
-		).Output()
-		if err != nil {
-			ch <- res{nil}
+			"-EncodedCommand", encodePS(script),
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			se := stderr.String()
+			if len(se) > 400 {
+				se = se[:400]
+			}
+			ch <- res{nil, fmt.Sprintf("powershell exit error: %v | stderr: %s", err, se)}
 			return
 		}
-		trimmed := bytes.TrimSpace(out)
+
+		trimmed := bytes.TrimSpace(stdout.Bytes())
 		// Strip UTF-8 BOM if present
 		trimmed = bytes.TrimPrefix(trimmed, []byte{0xef, 0xbb, 0xbf})
 		if len(trimmed) == 0 {
-			ch <- res{nil}
+			se := stderr.String()
+			if len(se) > 300 {
+				se = se[:300]
+			}
+			ch <- res{nil, "powershell produced empty stdout; stderr: " + se}
 			return
 		}
+
 		var items []SoftwareItem
 		if err := json.Unmarshal(trimmed, &items); err != nil {
-			ch <- res{nil}
+			raw := string(trimmed)
+			if len(raw) > 300 {
+				raw = raw[:300]
+			}
+			ch <- res{nil, fmt.Sprintf("json parse error: %v | raw output: %s", err, raw)}
 			return
 		}
-		ch <- res{items}
+
+		ch <- res{items, ""}
 	}()
 
-	// Never let a slow PowerShell call hang the agent process
+	// 45s timeout — generous for slow machines or large registry hives
 	select {
 	case r := <-ch:
+		if r.errMsg != "" {
+			writeLog("software error: " + r.errMsg)
+			return nil
+		}
+		writeLog(fmt.Sprintf("software ok: %d apps collected", len(r.items)))
 		return r.items
-	case <-time.After(20 * time.Second):
+	case <-time.After(45 * time.Second):
+		writeLog("software: timed out after 45s")
 		return nil
 	}
 }
@@ -858,8 +932,10 @@ func main() {
 	case "--heartbeat":
 		cfg, err := loadConfig()
 		if err != nil {
+			writeLog("heartbeat: loadConfig failed: " + err.Error())
 			os.Exit(1)
 		}
+		writeLog(fmt.Sprintf("heartbeat: v%d starting", AGENT_VERSION))
 		hw := collectHardware()
 
 		// Collect installed software once per hour (nil otherwise — omitted from JSON)
@@ -869,6 +945,8 @@ func main() {
 			if len(sw) > 0 {
 				markSoftwareCollected()
 			}
+		} else {
+			writeLog("software: skipped (collected recently)")
 		}
 
 		hbResp, err := heartbeat(cfg.Token, hw, sw)
