@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 7
+const AGENT_VERSION = 8
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -412,6 +412,26 @@ func expandWinEnv(path string) string {
 	return result
 }
 
+// diskUsageTimeout calls disk.Usage with a timeout so that slow or disconnected
+// network drives (e.g. an unmapped share) don't freeze the whole agent process.
+func diskUsageTimeout(mountpoint string, timeout time.Duration) (*disk.UsageStat, error) {
+	type res struct {
+		u   *disk.UsageStat
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		u, err := disk.Usage(mountpoint)
+		ch <- res{u, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.u, r.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout querying %s", mountpoint)
+	}
+}
+
 // browseToJSON returns a JSON string for a directory or drives listing
 func browseToJSON(expandedPath string) (browseJSON string, err error) {
 	// ── Drives listing ───────────────────────────────────────────────────────
@@ -419,7 +439,9 @@ func browseToJSON(expandedPath string) (browseJSON string, err error) {
 		parts, _ := disk.Partitions(false)
 		var drives []BrowseDrive
 		for _, p := range parts {
-			usage, err := disk.Usage(p.Mountpoint)
+			// 3-second per-drive timeout — skips network drives that are
+			// mapped but unreachable, which would otherwise block for minutes.
+			usage, err := diskUsageTimeout(p.Mountpoint, 3*time.Second)
 			if err != nil {
 				continue
 			}
@@ -436,31 +458,49 @@ func browseToJSON(expandedPath string) (browseJSON string, err error) {
 		return string(b), nil
 	}
 
-	// ── Directory listing ────────────────────────────────────────────────────
-	entries, err := os.ReadDir(expandedPath)
-	if err != nil {
-		return "", err
+	// ── Directory listing (with 8-second overall timeout) ───────────────────
+	type dirRes struct {
+		items []BrowseItem
+		err   error
 	}
-	var items []BrowseItem
-	for _, entry := range entries {
-		info, err := entry.Info()
+	dirCh := make(chan dirRes, 1)
+	go func() {
+		entries, err := os.ReadDir(expandedPath)
 		if err != nil {
-			continue
+			dirCh <- dirRes{nil, err}
+			return
 		}
-		items = append(items, BrowseItem{
-			Name:     entry.Name(),
-			IsDir:    entry.IsDir(),
-			Size:     info.Size(),
-			Modified: info.ModTime().UTC().Format(time.RFC3339),
-		})
+		var items []BrowseItem
+		for _, entry := range entries {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			items = append(items, BrowseItem{
+				Name:     entry.Name(),
+				IsDir:    entry.IsDir(),
+				Size:     info.Size(),
+				Modified: info.ModTime().UTC().Format(time.RFC3339),
+			})
+		}
+		dirCh <- dirRes{items, nil}
+	}()
+
+	select {
+	case r := <-dirCh:
+		if r.err != nil {
+			return "", r.err
+		}
+		result := map[string]interface{}{
+			"type":  "directory",
+			"path":  expandedPath,
+			"items": r.items,
+		}
+		b, _ := json.Marshal(result)
+		return string(b), nil
+	case <-time.After(8 * time.Second):
+		return "", fmt.Errorf("timeout listing directory %s (slow network path?)", expandedPath)
 	}
-	result := map[string]interface{}{
-		"type":  "directory",
-		"path":  expandedPath,
-		"items": items,
-	}
-	b, _ := json.Marshal(result)
-	return string(b), nil
 }
 
 // processUploads handles file browse + file collect requests from the dashboard
