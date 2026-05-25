@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Monitor, Wifi, WifiOff, Wrench, LayoutDashboard, Cpu, MemoryStick, HardDrive, Activity } from 'lucide-react';
+import { Monitor, Wifi, WifiOff, Wrench, LayoutDashboard, Cpu, MemoryStick, HardDrive, Activity, AlertTriangle } from 'lucide-react';
 import type { Device } from '../types';
 
 function fmtBytes(b: number) {
@@ -112,7 +112,9 @@ export const Dashboard: React.FC = () => {
     { label: 'Maintenance',     value: maintenance, icon: Wrench,    color: 'text-amber-400',   bg: 'bg-amber-500/10',   border: 'border-amber-500/20' },
   ];
 
-  const agentDevices = devices.filter(d => !!d.agent_token && !!d.hardware);
+  const agentDevices  = devices.filter(d => !!d.agent_token && !!d.hardware);
+  // Devices that have an agent but haven't checked in for > 30 min
+  const offlineAgents = devices.filter(d => !!d.agent_token && !isOnlineByAgent(d));
 
   return (
     <div className="p-6 space-y-6">
@@ -143,6 +145,42 @@ export const Dashboard: React.FC = () => {
           </div>
         ))}
       </div>
+
+      {/* Offline agent alert */}
+      {offlineAgents.length > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/25 rounded-xl px-5 py-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-amber-300">
+                {offlineAgents.length === 1
+                  ? `${offlineAgents[0].device_name} agent is not reporting`
+                  : `${offlineAgents.length} agents are not reporting`}
+              </p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Last seen:{' '}
+                {offlineAgents.map((d, i) => {
+                  const mins = d.last_seen
+                    ? Math.round((Date.now() - new Date(d.last_seen).getTime()) / 60000)
+                    : null;
+                  const ago = mins === null ? 'never' : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`;
+                  return (
+                    <span key={d.id}>
+                      {i > 0 && ', '}
+                      <span className="text-white font-medium">{d.device_name}</span> ({ago})
+                    </span>
+                  );
+                })}
+              </p>
+              <p className="text-xs text-slate-500 mt-2">
+                To restart: on the device open{' '}
+                <span className="font-mono text-slate-300">C:\ProgramData\DeviceManager\DeviceManagerAgent.exe</span>
+                {' '}or re-run the installer.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Agent live cards */}
       {agentDevices.length > 0 && (

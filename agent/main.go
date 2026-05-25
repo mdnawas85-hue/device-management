@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 6
+const AGENT_VERSION = 7
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -593,6 +593,33 @@ func selfUpdate(downloadURL string) {
 
 // ── Install ───────────────────────────────────────────────────────────────────
 
+// installWithPowerShell registers a robust scheduled task using PowerShell.
+// It creates TWO triggers:
+//   1. AtStartup  — fires immediately on every system boot (no waiting)
+//   2. Repetition — fires every 1 minute as an ongoing heartbeat
+//
+// Additional settings:
+//   - StartWhenAvailable: if a trigger was missed (machine was off), run it on next boot
+//   - RestartCount 3 / every 1 min: auto-restart up to 3 times if the heartbeat crashes
+//   - MultipleInstances IgnoreNew: prevents overlapping runs
+func installWithPowerShell(dest string) error {
+	script := "$exe = '" + dest + "'\n" +
+		"$act = New-ScheduledTaskAction -Execute $exe -Argument '--heartbeat'\n" +
+		"$t1  = New-ScheduledTaskTrigger -AtStartup\n" +
+		"$t2  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration ([TimeSpan]::MaxValue)\n" +
+		"$set = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew\n" +
+		"$pri = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest\n" +
+		"Register-ScheduledTask -TaskName 'DeviceManagerAgent' -Action $act -Trigger @($t1,$t2) -Settings $set -Principal $pri -Force | Out-Null\n"
+
+	out, err := exec.Command("powershell",
+		"-NonInteractive", "-NoProfile", "-Command", script,
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("powershell: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func installScheduledTask(exePath string) error {
 	if runtime.GOOS != "windows" {
 		fmt.Println("  [skip] Scheduled task only supported on Windows")
@@ -616,7 +643,13 @@ func installScheduledTask(exePath string) error {
 
 	taskCmd := fmt.Sprintf(`"%s" --heartbeat`, dest)
 
-	// ── Attempt 1: SYSTEM-level task (requires admin, best option) ───────────
+	// ── Attempt 1: PowerShell (AtStartup + Repetition + StartWhenAvailable) ──
+	if err := installWithPowerShell(dest); err == nil {
+		fmt.Println("✓ Auto-reporting scheduled (SYSTEM, starts on boot + every 1 min)")
+		return nil
+	}
+
+	// ── Attempt 2: SYSTEM-level schtasks (requires admin) ────────────────────
 	err := exec.Command("schtasks",
 		"/create", "/tn", "DeviceManagerAgent",
 		"/tr", taskCmd,
@@ -628,7 +661,7 @@ func installScheduledTask(exePath string) error {
 		return nil
 	}
 
-	// ── Attempt 2: User-level task (no admin needed) ─────────────────────────
+	// ── Attempt 3: User-level schtasks (no admin needed) ─────────────────────
 	err = exec.Command("schtasks",
 		"/create", "/tn", "DeviceManagerAgent",
 		"/tr", taskCmd,
@@ -639,7 +672,7 @@ func installScheduledTask(exePath string) error {
 		return nil
 	}
 
-	// ── Attempt 3: Startup folder (no admin, runs at each login) ────────────
+	// ── Attempt 4: Startup folder (no admin, runs at each login) ─────────────
 	startupDir := filepath.Join(
 		os.Getenv("APPDATA"),
 		"Microsoft", "Windows", "Start Menu", "Programs", "Startup",
