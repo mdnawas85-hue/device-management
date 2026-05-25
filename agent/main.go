@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 8
+const AGENT_VERSION = 10
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -261,35 +261,67 @@ func markSoftwareCollected() {
 // collectInstalledSoftware reads installed programs from the Windows registry via
 // PowerShell. It reads both the 64-bit and 32-bit Uninstall keys, deduplicates by
 // name, and returns them sorted alphabetically. Returns nil on non-Windows or error.
+//
+// Robustness measures:
+//   - -ExecutionPolicy Bypass: works on corporate machines with restricted policies
+//   - List<T> instead of $r+=: O(1) appends (avoids O(n²) slowdown for 100+ apps)
+//   - UTF-8 output encoding: handles international software names correctly
+//   - 20-second goroutine timeout: agent process never hangs
 func collectInstalledSoftware() []SoftwareItem {
 	if runtime.GOOS != "windows" {
 		return nil
 	}
 
-	// Compact one-liner: read both registry hives, deduplicate by name, sort, output JSON
-	script := `$p=@('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*');` +
-		`$s=@{};$r=@();` +
-		`foreach($q in $p){try{Get-ItemProperty $q -EA 0|?{$_.DisplayName}|%{` +
-		`$n=$_.DisplayName.Trim();if(!$s[$n]){$s[$n]=1;` +
-		`$r+=[PSCustomObject]@{name=$n;` +
-		`version=$(if($_.DisplayVersion){$_.DisplayVersion.Trim()}else{''});` +
-		`publisher=$(if($_.Publisher){$_.Publisher.Trim()}else{''});` +
-		`install_date=$(if($_.InstallDate){$_.InstallDate.Trim()}else{''})}}}catch{}}};` +
-		`ConvertTo-Json -InputObject @($r|Sort-Object name) -Compress`
+	type res struct{ items []SoftwareItem }
+	ch := make(chan res, 1)
 
-	out, err := exec.Command("powershell", "-NonInteractive", "-NoProfile", "-Command", script).Output()
-	if err != nil {
+	go func() {
+		// List<object> gives O(1) .Add() — avoids the O(n²) $r+= array copy pattern
+		// that makes PowerShell hang on machines with 150+ installed apps.
+		script := `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;` +
+			`$l=[System.Collections.Generic.List[object]]::new();$s=@{};` +
+			`foreach($p in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',` +
+			`'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')){` +
+			`try{Get-ItemProperty $p -EA 0|?{$_.DisplayName}|%{` +
+			`$n=$_.DisplayName.Trim();if(!$s[$n]){$s[$n]=1;` +
+			`$l.Add([PSCustomObject]@{name=$n;` +
+			`version=$(if($_.DisplayVersion){$_.DisplayVersion.Trim()}else{''});` +
+			`publisher=$(if($_.Publisher){$_.Publisher.Trim()}else{''});` +
+			`install_date=$(if($_.InstallDate){$_.InstallDate.Trim()}else{''})})}}}catch{}}` +
+			`ConvertTo-Json -InputObject @($l|Sort-Object name) -Compress`
+
+		out, err := exec.Command(
+			"powershell",
+			"-ExecutionPolicy", "Bypass", // works even on restricted corporate machines
+			"-NonInteractive", "-NoProfile",
+			"-Command", script,
+		).Output()
+		if err != nil {
+			ch <- res{nil}
+			return
+		}
+		trimmed := bytes.TrimSpace(out)
+		// Strip UTF-8 BOM if present
+		trimmed = bytes.TrimPrefix(trimmed, []byte{0xef, 0xbb, 0xbf})
+		if len(trimmed) == 0 {
+			ch <- res{nil}
+			return
+		}
+		var items []SoftwareItem
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			ch <- res{nil}
+			return
+		}
+		ch <- res{items}
+	}()
+
+	// Never let a slow PowerShell call hang the agent process
+	select {
+	case r := <-ch:
+		return r.items
+	case <-time.After(20 * time.Second):
 		return nil
 	}
-	trimmed := bytes.TrimSpace(out)
-	if len(trimmed) == 0 {
-		return nil
-	}
-	var items []SoftwareItem
-	if err := json.Unmarshal(trimmed, &items); err != nil {
-		return nil
-	}
-	return items
 }
 
 // ── Heartbeat ─────────────────────────────────────────────────────────────────
