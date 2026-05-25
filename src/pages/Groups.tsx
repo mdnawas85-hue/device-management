@@ -41,7 +41,7 @@ export const Groups: React.FC = () => {
   });
 
   const selectedDevices = selected ? devices.filter(d => d.group === selected) : [];
-  const filteredDevices = subFilter === 'All'
+  const filteredDevices = (selected !== 'Restaurant' || subFilter === 'All')
     ? selectedDevices
     : selectedDevices.filter(d => d.sub_group === subFilter);
 
@@ -181,8 +181,8 @@ export const Groups: React.FC = () => {
                 </div>
               </div>
 
-              {/* Sub-group filter chips */}
-              <div className="flex flex-wrap gap-2">
+              {/* Sub-group filter chips — only for Restaurant */}
+              {selected === 'Restaurant' && <div className="flex flex-wrap gap-2">
                 {['All', ...SUB_GROUPS].map(sg => {
                   const count  = sg === 'All'
                     ? selectedDevices.length
@@ -205,7 +205,7 @@ export const Groups: React.FC = () => {
                     </button>
                   );
                 })}
-              </div>
+              </div>}
 
               {/* Devices table */}
               <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
