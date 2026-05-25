@@ -910,12 +910,15 @@ const RdpModal: React.FC<RdpModalProps> = ({ device, onClose }) => {
   );
 };
 
+interface Command { id: string; action: string; software_name: string; status: string; error: string | null; created_at: string; completed_at: string | null; }
+
 interface SoftwareModalProps { device: Device; onClose: () => void; }
 const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
   const [apps,        setApps]        = useState<SoftwareItem[]>([]);
   const [updatedAt,   setUpdatedAt]   = useState<string | null>(null);
   const [loading,     setLoading]     = useState(true);
   const [search,      setSearch]      = useState('');
+  const [commands,    setCommands]    = useState<Command[]>([]);
   // uninstall: maps app name → 'confirm' | 'pending' | 'queued' | 'failed'
   const [uninstallState, setUninstallState] = useState<Record<string, string>>({});
 
@@ -928,6 +931,11 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
+    // also load recent uninstall commands
+    fetch(`/api/commands?device_id=${device.id}`)
+      .then(r => r.json())
+      .then(d => setCommands(Array.isArray(d) ? d : []))
+      .catch(() => {});
   }, [device.id]);
 
   const filtered = search
@@ -947,7 +955,10 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
         body: JSON.stringify({ device_id: device.id, action: 'uninstall', software_name: appName }),
       })
         .then(r => r.ok ? r.json() : Promise.reject())
-        .then(() => setUninstallState(s => ({ ...s, [appName]: 'queued' })))
+        .then((cmd: Command) => {
+          setUninstallState(s => ({ ...s, [appName]: 'queued' }));
+          setCommands(prev => [cmd, ...prev]);
+        })
         .catch(() => setUninstallState(s => ({ ...s, [appName]: 'failed' })));
     } else if (!cur || cur === 'failed') {
       // first click = ask confirm
@@ -1099,6 +1110,34 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
             </>
           )}
         </div>
+
+        {/* Command history */}
+        {commands.length > 0 && (
+          <div className="px-5 py-3 border-t border-slate-700 shrink-0 space-y-1.5">
+            <p className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-2">Uninstall Commands</p>
+            {commands.slice(0, 5).map(cmd => {
+              const statusStyle =
+                cmd.status === 'done'    ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' :
+                cmd.status === 'failed'  ? 'text-red-400 bg-red-500/10 border-red-500/20' :
+                cmd.status === 'running' ? 'text-blue-400 bg-blue-500/10 border-blue-500/20' :
+                                           'text-amber-400 bg-amber-500/10 border-amber-500/20';
+              return (
+                <div key={cmd.id} className="flex items-center gap-2">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${statusStyle} shrink-0 uppercase`}>
+                    {cmd.status}
+                  </span>
+                  <span className="text-xs text-slate-300 truncate flex-1">{cmd.software_name}</span>
+                  {cmd.error && (
+                    <span className="text-[10px] text-red-400 truncate max-w-[200px]" title={cmd.error}>{cmd.error}</span>
+                  )}
+                  <span className="text-[10px] text-slate-600 shrink-0">
+                    {new Date(cmd.created_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Footer */}
         {!loading && (updatedAt || apps.length > 0) && (
