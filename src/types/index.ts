@@ -48,6 +48,8 @@ export interface Device {
   purchase_date: string | null;
   warranty_end:  string | null;
   notes:         string | null;
+  group:         string | null;
+  sub_group:     string | null;
   created_at:    string;
   updated_at:    string;
   // Agent fields

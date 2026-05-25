@@ -20,12 +20,16 @@ const EMPTY: Device = {
   serial_number: '', mac_address: '', ip_address: '', os: 'Windows',
   os_version: '', status: 'Online', assigned_to: '', department: '',
   location: '', purchase_date: '', warranty_end: '', notes: '',
+  group: '', sub_group: '',
   created_at: '', updated_at: '',
 };
 
 const TYPES    = ['Laptop','Desktop','Phone','Tablet','Server','Printer','Network','Other'];
 const OS_LIST  = ['Windows','macOS','Linux','Android','iOS','Other'];
 const STATUSES = ['Online','Offline','Maintenance','Retired'];
+
+const GROUPS     = ['Head Office','Cake Factory','Meat Factory','Sulaywarehouse','Restaurant'];
+const SUB_GROUPS = ['Center Region','Western Region','Northern Region','Eastern Region'];
 
 function fmtBytes(b: number) {
   if (b >= 1e12) return (b / 1e12).toFixed(1) + ' TB';
@@ -124,6 +128,34 @@ const Modal: React.FC<ModalProps> = ({ device, onClose, onSaved }) => {
             {F('Location','location')} {F('Purchase Date','purchase_date','date')}
             {F('Warranty End','warranty_end','date')}
           </div>
+
+          {/* Group / Sub-group */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 border-t border-slate-700">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Group</label>
+              <select
+                value={(form.group as string) ?? ''}
+                onChange={e => { set('group', e.target.value); set('sub_group', ''); }}
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-blue-500 transition"
+              >
+                <option value="">— None —</option>
+                {GROUPS.map(g => <option key={g}>{g}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Sub-group / Region</label>
+              <select
+                value={(form.sub_group as string) ?? ''}
+                onChange={e => set('sub_group', e.target.value)}
+                disabled={!form.group}
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-blue-500 transition disabled:opacity-40"
+              >
+                <option value="">— None —</option>
+                {SUB_GROUPS.map(s => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1">Notes</label>
             <textarea value={form.notes ?? ''} onChange={e => set('notes', e.target.value)} rows={2}
@@ -988,6 +1020,7 @@ export const Devices: React.FC = () => {
   const [search,       setSearch]       = useState('');
   const [typeFilter,   setTypeFilter]   = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
+  const [groupFilter,  setGroupFilter]  = useState('All');
   const [modal,        setModal]        = useState<Device | null | 'new'>(null);
   const [transferDev,  setTransferDev]  = useState<Device | null>(null);
   const [collectDev,   setCollectDev]   = useState<Device | null>(null);
@@ -1039,7 +1072,8 @@ export const Devices: React.FC = () => {
         (d.ip_address ?? '').toLowerCase().includes(q) ||
         (d.serial_number ?? '').toLowerCase().includes(q)) &&
       (typeFilter   === 'All' || d.device_type === typeFilter) &&
-      (statusFilter === 'All' || d.status === statusFilter)
+      (statusFilter === 'All' || d.status      === statusFilter) &&
+      (groupFilter  === 'All' || d.group       === groupFilter)
     );
   });
 
@@ -1110,6 +1144,11 @@ export const Devices: React.FC = () => {
           className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 outline-none focus:ring-2 focus:ring-blue-500">
           {['All', ...STATUSES].map(s => <option key={s}>{s}</option>)}
         </select>
+        <select value={groupFilter} onChange={e => setGroupFilter(e.target.value)}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="All">All Groups</option>
+          {GROUPS.map(g => <option key={g}>{g}</option>)}
+        </select>
       </div>
 
       {error && <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl px-4 py-3 text-sm"><AlertCircle className="w-4 h-4 shrink-0" />{error}</div>}
@@ -1151,7 +1190,14 @@ export const Devices: React.FC = () => {
                             </button>
                           )}
                         </td>
-                        <td className="px-4 py-3 font-medium text-white whitespace-nowrap">{d.device_name}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span className="font-medium text-white">{d.device_name}</span>
+                          {(d.group || d.sub_group) && (
+                            <p className="text-[11px] text-slate-500 mt-0.5 leading-tight">
+                              {[d.group, d.sub_group].filter(Boolean).join(' · ')}
+                            </p>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{d.device_type}</td>
                         <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{d.os ?? '—'}</td>
                         <td className="px-4 py-3 text-slate-400 font-mono text-xs whitespace-nowrap">

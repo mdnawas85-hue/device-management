@@ -58,6 +58,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       purchase_date: body.purchase_date ? String(body.purchase_date) : null,
       warranty_end:  body.warranty_end  ? String(body.warranty_end)  : null,
       notes:         body.notes         ? String(body.notes)         : null,
+      group:         body.group         ? String(body.group)         : null,
+      sub_group:     body.sub_group     ? String(body.sub_group)     : null,
       created_at:    now,
       updated_at:    now,
     };
@@ -73,7 +75,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     const fields = ['device_name','device_type','brand','model','serial_number','mac_address',
                     'ip_address','os','os_version','status','assigned_to','department',
-                    'location','purchase_date','warranty_end','notes'] as const;
+                    'location','purchase_date','warranty_end','notes','group','sub_group'] as const;
     for (const f of fields) {
       if (f in body) update[f] = body[f] ? String(body[f]) : null;
     }
