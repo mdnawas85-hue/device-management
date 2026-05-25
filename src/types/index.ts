@@ -54,6 +54,7 @@ export interface Device {
   updated_at:    string;
   // Agent fields
   agent_token?:          string;
+  agent_version?:        number | null;
   hostname?:             string;
   last_seen?:            string | null;
   hardware?:             HardwareInfo | null;

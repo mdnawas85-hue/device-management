@@ -1270,6 +1270,9 @@ export const Devices: React.FC = () => {
                             }`}>
                               <span className={`w-1.5 h-1.5 rounded-full ${agentLive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
                               {agentLive ? 'Live' : 'Installed'}
+                              {d.agent_version != null && (
+                                <span className="opacity-60 font-normal">v{d.agent_version}</span>
+                              )}
                             </span>
                           ) : (
                             <span className="text-xs text-slate-600">—</span>
