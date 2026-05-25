@@ -4,8 +4,9 @@ import {
   CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
   Cpu, MemoryStick, HardDrive, Activity, Download,
   UploadCloud, DownloadCloud, FileText, X, Clock, CheckCheck, FolderOpen,
+  Package,
 } from 'lucide-react';
-import type { Device, FileTransfer, FileUploadRequest, BrowseResult, BrowseItem, BrowseDrive } from '../types';
+import type { Device, SoftwareItem, FileTransfer, FileUploadRequest, BrowseResult, BrowseItem, BrowseDrive } from '../types';
 
 const STATUS_COLORS: Record<string, string> = {
   Online:      'bg-emerald-500/15 text-emerald-400 border-emerald-500/20',
@@ -751,6 +752,164 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
   );
 };
 
+// ── Software Modal ────────────────────────────────────────────────────────────
+interface SoftwareModalProps { device: Device; onClose: () => void; }
+const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
+  const [apps,        setApps]        = useState<SoftwareItem[]>([]);
+  const [updatedAt,   setUpdatedAt]   = useState<string | null>(null);
+  const [loading,     setLoading]     = useState(true);
+  const [search,      setSearch]      = useState('');
+
+  useEffect(() => {
+    fetch(`/api/devices?id=${device.id}&software=1`)
+      .then(r => r.json())
+      .then(d => {
+        setApps(Array.isArray(d.installed_software) ? d.installed_software : []);
+        setUpdatedAt(d.software_updated_at ?? null);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [device.id]);
+
+  const filtered = search
+    ? apps.filter(a =>
+        a.name.toLowerCase().includes(search.toLowerCase()) ||
+        (a.publisher ?? '').toLowerCase().includes(search.toLowerCase()))
+    : apps;
+
+  function fmtInstallDate(d: string) {
+    if (!d || d.length < 8) return '—';
+    try {
+      return new Date(`${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`)
+        .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    } catch { return d; }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+         onClick={onClose}>
+      <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col"
+           style={{ height: '82vh' }} onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-violet-500/15 border border-violet-500/20 flex items-center justify-center">
+              <Package className="w-4 h-4 text-violet-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white">Installed Software</h2>
+              <p className="text-xs text-slate-400">
+                {device.device_name}
+                {!loading && apps.length > 0 && (
+                  <span className="ml-2 bg-violet-500/15 text-violet-400 border border-violet-500/20 rounded-full px-2 py-0.5 text-[10px] font-semibold">
+                    {apps.length} apps
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Search */}
+        {!loading && apps.length > 0 && (
+          <div className="px-4 py-3 border-b border-slate-700/60 shrink-0">
+            <div className="flex items-center gap-2 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2">
+              <Search className="w-4 h-4 text-slate-400 shrink-0" />
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search by name or publisher…"
+                autoFocus
+                className="bg-transparent text-sm text-white placeholder-slate-500 outline-none flex-1"
+              />
+              {search && (
+                <button onClick={() => setSearch('')} className="text-slate-500 hover:text-white transition">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto">
+          {loading ? (
+            <div className="flex items-center justify-center h-full gap-3 text-slate-400">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span className="text-sm">Loading software list…</span>
+            </div>
+          ) : apps.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-500">
+              <Package className="w-10 h-10 text-slate-600" />
+              <p className="text-sm font-medium text-slate-400">No software data yet</p>
+              <p className="text-xs text-center max-w-xs">
+                The agent collects the installed software list once per hour.
+                {device.agent_token
+                  ? ' Check back after the next heartbeat.'
+                  : ' Link this device to the agent first.'}
+              </p>
+            </div>
+          ) : (
+            <>
+              <table className="w-full text-sm">
+                <thead className="border-b border-slate-700 sticky top-0 bg-slate-800 z-10">
+                  <tr className="text-xs text-slate-400 font-medium">
+                    <th className="text-left px-5 py-2.5">#</th>
+                    <th className="text-left px-4 py-2.5">Name</th>
+                    <th className="text-left px-4 py-2.5 w-36">Version</th>
+                    <th className="text-left px-4 py-2.5 w-44">Publisher</th>
+                    <th className="text-left px-4 py-2.5 w-28">Installed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((app, i) => (
+                    <tr key={i} className="border-b border-slate-700/40 hover:bg-slate-700/30 transition group">
+                      <td className="px-5 py-2 text-slate-600 text-xs font-mono">{i + 1}</td>
+                      <td className="px-4 py-2 text-white font-medium max-w-xs">
+                        <span className="truncate block">{app.name}</span>
+                      </td>
+                      <td className="px-4 py-2 text-slate-400 font-mono text-xs">{app.version || '—'}</td>
+                      <td className="px-4 py-2 text-slate-400 text-xs">
+                        <span className="truncate block max-w-[160px]">{app.publisher || '—'}</span>
+                      </td>
+                      <td className="px-4 py-2 text-slate-500 text-xs whitespace-nowrap">{fmtInstallDate(app.install_date)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {filtered.length === 0 && (
+                <p className="text-center text-slate-500 text-sm py-10">
+                  No results for "<span className="text-white">{search}</span>"
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        {!loading && (updatedAt || apps.length > 0) && (
+          <div className="px-5 py-2.5 border-t border-slate-700 shrink-0 flex items-center justify-between">
+            <p className="text-xs text-slate-600">
+              {updatedAt
+                ? `Last collected ${new Date(updatedAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })} · updates hourly`
+                : 'Updates hourly via agent'}
+            </p>
+            {search && (
+              <p className="text-xs text-slate-500">
+                {filtered.length} of {apps.length} shown
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ── Agent Hardware expand row ─────────────────────────────────────────────────
 const HardwareRow: React.FC<{ d: Device }> = ({ d }) => {
   const hw = d.hardware;
@@ -832,6 +991,7 @@ export const Devices: React.FC = () => {
   const [modal,        setModal]        = useState<Device | null | 'new'>(null);
   const [transferDev,  setTransferDev]  = useState<Device | null>(null);
   const [collectDev,   setCollectDev]   = useState<Device | null>(null);
+  const [softwareDev,  setSoftwareDev]  = useState<Device | null>(null);
   const [delConf,      setDelConf]      = useState<string | null>(null);
   const [delId,        setDelId]        = useState<string | null>(null);
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
@@ -1035,6 +1195,14 @@ export const Devices: React.FC = () => {
                                 <DownloadCloud className="w-3.5 h-3.5" />
                               </button>
                             )}
+                            {/* Installed software */}
+                            {hasAgent && (
+                              <button onClick={() => setSoftwareDev(d)}
+                                title="View installed software"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-violet-400 hover:bg-violet-500/10 transition">
+                                <Package className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             <button onClick={() => setModal(d)} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition"><Pencil className="w-3.5 h-3.5" /></button>
                             {delConf === d.id ? (
                               <div className="flex gap-1">
@@ -1064,6 +1232,7 @@ export const Devices: React.FC = () => {
       {modal === 'new'           && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
       {transferDev               && <FileTransferModal device={transferDev} onClose={() => setTransferDev(null)} />}
       {collectDev                && <FileManagerModal   device={collectDev}  onClose={() => setCollectDev(null)} />}
+      {softwareDev               && <SoftwareModal      device={softwareDev} onClose={() => setSoftwareDev(null)} />}
     </div>
   );
 };

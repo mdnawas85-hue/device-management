@@ -23,6 +23,13 @@ export interface HardwareInfo {
   platform?:     string;
 }
 
+export interface SoftwareItem {
+  name:         string;
+  version:      string;
+  publisher:    string;
+  install_date: string;
+}
+
 export interface Device {
   id:            string;
   device_name:   string;
@@ -44,10 +51,11 @@ export interface Device {
   created_at:    string;
   updated_at:    string;
   // Agent fields
-  agent_token?:  string;
-  hostname?:     string;
-  last_seen?:    string | null;
-  hardware?:     HardwareInfo | null;
+  agent_token?:          string;
+  hostname?:             string;
+  last_seen?:            string | null;
+  hardware?:             HardwareInfo | null;
+  software_updated_at?:  string | null;
 }
 
 export interface FileTransfer {

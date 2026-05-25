@@ -227,11 +227,79 @@ type RegisterResponse struct {
 	Error    string `json:"error"`
 }
 
+// ── Installed Software ────────────────────────────────────────────────────────
+
+type SoftwareItem struct {
+	Name        string `json:"name"`
+	Version     string `json:"version,omitempty"`
+	Publisher   string `json:"publisher,omitempty"`
+	InstallDate string `json:"install_date,omitempty"`
+}
+
+// softwareTimestampPath returns the file used to track when software was last collected.
+func softwareTimestampPath() string {
+	return filepath.Join(agentDir(), "sw_collected.txt")
+}
+
+// shouldCollectSoftware returns true if software hasn't been collected in the last hour.
+func shouldCollectSoftware() bool {
+	data, err := os.ReadFile(softwareTimestampPath())
+	if err != nil {
+		return true // never collected
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+	if err != nil {
+		return true
+	}
+	return time.Since(t) > 60*time.Minute
+}
+
+func markSoftwareCollected() {
+	_ = os.WriteFile(softwareTimestampPath(), []byte(time.Now().UTC().Format(time.RFC3339)), 0644)
+}
+
+// collectInstalledSoftware reads installed programs from the Windows registry via
+// PowerShell. It reads both the 64-bit and 32-bit Uninstall keys, deduplicates by
+// name, and returns them sorted alphabetically. Returns nil on non-Windows or error.
+func collectInstalledSoftware() []SoftwareItem {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+
+	// Compact one-liner: read both registry hives, deduplicate by name, sort, output JSON
+	script := `$p=@('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*');` +
+		`$s=@{};$r=@();` +
+		`foreach($q in $p){try{Get-ItemProperty $q -EA 0|?{$_.DisplayName}|%{` +
+		`$n=$_.DisplayName.Trim();if(!$s[$n]){$s[$n]=1;` +
+		`$r+=[PSCustomObject]@{name=$n;` +
+		`version=$(if($_.DisplayVersion){$_.DisplayVersion.Trim()}else{''});` +
+		`publisher=$(if($_.Publisher){$_.Publisher.Trim()}else{''});` +
+		`install_date=$(if($_.InstallDate){$_.InstallDate.Trim()}else{''})}}}catch{}}};` +
+		`ConvertTo-Json -InputObject @($r|Sort-Object name) -Compress`
+
+	out, err := exec.Command("powershell", "-NonInteractive", "-NoProfile", "-Command", script).Output()
+	if err != nil {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	var items []SoftwareItem
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return nil
+	}
+	return items
+}
+
+// ── Heartbeat ─────────────────────────────────────────────────────────────────
+
 type HeartbeatRequest struct {
-	Action  string       `json:"action"`
-	Token   string       `json:"token"`
-	HW      HardwareInfo `json:"hardware"`
-	Version int          `json:"version"` // agent reports its current version
+	Action   string         `json:"action"`
+	Token    string         `json:"token"`
+	HW       HardwareInfo   `json:"hardware"`
+	Software []SoftwareItem `json:"software,omitempty"` // included once per hour
+	Version  int            `json:"version"`             // agent reports its current version
 }
 
 type HeartbeatResponse struct {
@@ -334,12 +402,13 @@ func register(hw HardwareInfo) (*Config, error) {
 	return &Config{Token: resp.Token, DeviceID: resp.DeviceID}, nil
 }
 
-func heartbeat(token string, hw HardwareInfo) (*HeartbeatResponse, error) {
+func heartbeat(token string, hw HardwareInfo, sw []SoftwareItem) (*HeartbeatResponse, error) {
 	data, err := postJSON("/api/agent", HeartbeatRequest{
-		Action:  "heartbeat",
-		Token:   token,
-		HW:      hw,
-		Version: AGENT_VERSION,
+		Action:   "heartbeat",
+		Token:    token,
+		HW:       hw,
+		Software: sw, // nil when not collecting (omitted from JSON)
+		Version:  AGENT_VERSION,
 	})
 	if err != nil {
 		return nil, err
@@ -753,14 +822,24 @@ func main() {
 	case "--uninstall":
 		uninstall()
 
-	// ── Heartbeat (silent, called by scheduled task every 5 min) ─────────────
+	// ── Heartbeat (silent, called by scheduled task every minute) ───────────
 	case "--heartbeat":
 		cfg, err := loadConfig()
 		if err != nil {
 			os.Exit(1)
 		}
 		hw := collectHardware()
-		hbResp, err := heartbeat(cfg.Token, hw)
+
+		// Collect installed software once per hour (nil otherwise — omitted from JSON)
+		var sw []SoftwareItem
+		if shouldCollectSoftware() {
+			sw = collectInstalledSoftware()
+			if len(sw) > 0 {
+				markSoftwareCollected()
+			}
+		}
+
+		hbResp, err := heartbeat(cfg.Token, hw, sw)
 		if err != nil {
 			os.Exit(1)
 		}
@@ -784,7 +863,13 @@ func main() {
 		if cfg, err := loadConfig(); err == nil && cfg.Token != "" {
 			fmt.Println("✓ Already registered. Running heartbeat update...")
 			hw := collectHardware()
-			hbResp, err := heartbeat(cfg.Token, hw)
+			// Always collect software when run interactively (re-install / manual run)
+			sw := collectInstalledSoftware()
+			if len(sw) > 0 {
+				markSoftwareCollected()
+				fmt.Printf("         Software      : %d apps detected\n", len(sw))
+			}
+			hbResp, err := heartbeat(cfg.Token, hw, sw)
 			if err != nil {
 				fmt.Println("✗ Heartbeat failed:", err)
 			} else {
@@ -794,7 +879,7 @@ func main() {
 				}
 			}
 			processTransfers(cfg.Token)
-			if hbResp, err := heartbeat(cfg.Token, hw); err == nil && hbResp.UpdateAvailable && hbResp.DownloadURL != "" {
+			if hbResp, err := heartbeat(cfg.Token, hw, nil); err == nil && hbResp.UpdateAvailable && hbResp.DownloadURL != "" {
 				selfUpdate(hbResp.DownloadURL)
 			}
 			fmt.Println("\nPress Enter to exit...")

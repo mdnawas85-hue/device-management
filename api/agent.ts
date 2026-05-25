@@ -96,10 +96,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(201).json({ ok: true, token, device_id: id });
   }
 
-  // ── HEARTBEAT — called every 5 minutes ───────────────────────────────────
+  // ── HEARTBEAT — called every minute ──────────────────────────────────────
   if (action === 'heartbeat') {
-    const token        = body.token   as string;
+    const token        = body.token    as string;
     const hw           = body.hardware as Record<string, unknown>;
+    const software     = body.software as unknown[] | undefined; // sent once per hour
     const agentVersion = (body.version as number) ?? 0;
     if (!token) return res.status(400).json({ error: 'token is required' });
 
@@ -108,17 +109,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ? String(hw.ip_addresses[0]) : null;
     const serial = hw?.serial_number ? String(hw.serial_number) : null;
 
+    const setFields: Record<string, unknown> = {
+      hardware:      hw,
+      last_seen:     now,
+      updated_at:    now,
+      status:        'Online',
+      agent_version: agentVersion,
+      ...(firstIP ? { ip_address: firstIP } : {}),
+      ...(serial  ? { serial_number: serial } : {}),
+    };
+
+    // Store software list when agent sends it (once per hour)
+    if (Array.isArray(software) && software.length > 0) {
+      setFields.installed_software  = software;
+      setFields.software_updated_at = now;
+    }
+
     const result = await col.findOneAndUpdate(
       { agent_token: token },
-      { $set: {
-          hardware:      hw,
-          last_seen:     now,
-          updated_at:    now,
-          status:        'Online',
-          agent_version: agentVersion,
-          ...(firstIP ? { ip_address: firstIP } : {}),
-          ...(serial  ? { serial_number: serial } : {}),
-      }},
+      { $set: setFields },
       { returnDocument: 'after' },
     );
     if (!result) return res.status(404).json({ error: 'Device not found. Re-run agent installer.' });

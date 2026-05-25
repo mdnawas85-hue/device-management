@@ -11,9 +11,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const db  = await connectDB();
   const col = db.collection('devices');
 
-  // ── GET — list all devices ────────────────────────────────────────────────
+  // ── GET — list all devices (or fetch software for one device) ────────────
   if (req.method === 'GET') {
-    const devices = await col.find({}).sort({ created_at: -1 }).toArray();
+    // GET ?id=xxx&software=1 → return just the software list for one device
+    if (req.query.id && req.query.software) {
+      const doc = await col.findOne(
+        { id: String(req.query.id) },
+        { projection: { installed_software: 1, software_updated_at: 1 } },
+      );
+      if (!doc) return res.status(404).json({ error: 'Device not found' });
+      return res.json({
+        installed_software:  doc.installed_software  ?? [],
+        software_updated_at: doc.software_updated_at ?? null,
+      });
+    }
+
+    // Normal list — exclude the large installed_software array so the page loads fast
+    const devices = await col
+      .find({}, { projection: { installed_software: 0 } })
+      .sort({ created_at: -1 })
+      .toArray();
     return res.json(devices);
   }
 
