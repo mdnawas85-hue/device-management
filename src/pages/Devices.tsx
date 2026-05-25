@@ -4,7 +4,7 @@ import {
   CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
   Cpu, MemoryStick, HardDrive, Activity, Download,
   UploadCloud, DownloadCloud, FileText, X, Clock, CheckCheck, FolderOpen,
-  Package,
+  Package, ScreenShare, Copy, Check,
 } from 'lucide-react';
 import type { Device, SoftwareItem, FileTransfer, FileUploadRequest, BrowseResult, BrowseItem, BrowseDrive } from '../types';
 
@@ -785,6 +785,131 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
 };
 
 // ── Software Modal ────────────────────────────────────────────────────────────
+// ── RDP Modal ─────────────────────────────────────────────────────────────────
+interface RdpModalProps { device: Device; onClose: () => void; }
+const RdpModal: React.FC<RdpModalProps> = ({ device, onClose }) => {
+  const ip       = device.ip_address ?? device.hardware?.ip_addresses?.[0] ?? '';
+  const hostname = device.hostname   ?? device.device_name;
+  const target   = ip || hostname;
+  const [copied, setCopied] = useState(false);
+
+  function copyIp() {
+    navigator.clipboard.writeText(target).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function downloadRdp() {
+    const lines = [
+      `full address:s:${target}`,
+      `username:s:`,
+      `prompt for credentials:i:1`,
+      `screen mode id:i:2`,
+      `desktopwidth:i:1920`,
+      `desktopheight:i:1080`,
+      `session bpp:i:32`,
+      `compression:i:1`,
+      `keyboardhook:i:2`,
+      `connection type:i:7`,
+      `networkautodetect:i:1`,
+      `bandwidthautodetect:i:1`,
+      `displayconnectionbar:i:1`,
+      `disable wallpaper:i:0`,
+      `allow font smoothing:i:1`,
+      `disable full window drag:i:1`,
+      `authentication level:i:2`,
+      `negotiate security layer:i:1`,
+      `autoreconnection enabled:i:1`,
+      `redirectclipboard:i:1`,
+      `redirectprinters:i:1`,
+    ].join('\r\n');
+    const blob = new Blob([lines], { type: 'application/rdp' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${hostname}.rdp`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+         onClick={onClose}>
+      <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md"
+           onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/20 flex items-center justify-center">
+              <ScreenShare className="w-4 h-4 text-cyan-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white">Remote Desktop</h2>
+              <p className="text-xs text-slate-400">{device.device_name}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5 space-y-5">
+
+          {/* IP / Hostname row */}
+          <div className="bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Address</p>
+              <p className="text-sm font-mono font-semibold text-white">
+                {target || <span className="text-slate-500 font-normal">No IP address on record</span>}
+              </p>
+              {ip && hostname !== ip && (
+                <p className="text-xs text-slate-500 mt-0.5">{hostname}</p>
+              )}
+            </div>
+            <button onClick={copyIp} disabled={!target}
+              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium transition disabled:opacity-40">
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+
+          {/* Actions */}
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={downloadRdp} disabled={!target}
+              className="flex flex-col items-center gap-2 px-4 py-4 rounded-xl bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 text-cyan-400 transition disabled:opacity-40 disabled:cursor-not-allowed">
+              <Download className="w-5 h-5" />
+              <div className="text-center">
+                <p className="text-xs font-semibold">Download .rdp</p>
+                <p className="text-[10px] text-cyan-400/60 mt-0.5">Open with RDP client</p>
+              </div>
+            </button>
+            <button onClick={() => { if (target) window.location.href = `ms-rd:full%20address=s:${target}`; }}
+              disabled={!target}
+              className="flex flex-col items-center gap-2 px-4 py-4 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 text-blue-400 transition disabled:opacity-40 disabled:cursor-not-allowed">
+              <ScreenShare className="w-5 h-5" />
+              <div className="text-center">
+                <p className="text-xs font-semibold">Connect Now</p>
+                <p className="text-[10px] text-blue-400/60 mt-0.5">Opens RDP on Windows</p>
+              </div>
+            </button>
+          </div>
+
+          {/* Info note */}
+          <div className="bg-amber-500/8 border border-amber-500/20 rounded-lg px-4 py-3">
+            <p className="text-xs text-amber-400/80 leading-relaxed">
+              Make sure <span className="font-semibold text-amber-400">Remote Desktop is enabled</span> on the target device:
+              Settings → System → Remote Desktop → On
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 interface SoftwareModalProps { device: Device; onClose: () => void; }
 const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
   const [apps,        setApps]        = useState<SoftwareItem[]>([]);
@@ -1078,6 +1203,7 @@ export const Devices: React.FC = () => {
   const [transferDev,  setTransferDev]  = useState<Device | null>(null);
   const [collectDev,   setCollectDev]   = useState<Device | null>(null);
   const [softwareDev,  setSoftwareDev]  = useState<Device | null>(null);
+  const [rdpDev,       setRdpDev]       = useState<Device | null>(null);
   const [delConf,      setDelConf]      = useState<string | null>(null);
   const [delId,        setDelId]        = useState<string | null>(null);
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
@@ -1305,6 +1431,14 @@ export const Devices: React.FC = () => {
                                 <Package className="w-3.5 h-3.5" />
                               </button>
                             )}
+                            {/* RDP */}
+                            {(d.ip_address || d.hardware?.ip_addresses?.[0]) && (
+                              <button onClick={() => setRdpDev(d)}
+                                title="Remote Desktop (RDP)"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition">
+                                <ScreenShare className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             <button onClick={() => setModal(d)} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition"><Pencil className="w-3.5 h-3.5" /></button>
                             {delConf === d.id ? (
                               <div className="flex gap-1">
@@ -1334,6 +1468,7 @@ export const Devices: React.FC = () => {
       {modal === 'new'           && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
       {transferDev               && <FileTransferModal device={transferDev} onClose={() => setTransferDev(null)} />}
       {collectDev                && <FileManagerModal   device={collectDev}  onClose={() => setCollectDev(null)} />}
+      {rdpDev                    && <RdpModal           device={rdpDev}      onClose={() => setRdpDev(null)}      />}
       {softwareDev               && <SoftwareModal      device={softwareDev} onClose={() => setSoftwareDev(null)} />}
     </div>
   );
