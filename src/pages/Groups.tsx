@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Layers, RefreshCw, Monitor } from 'lucide-react';
 import type { Device } from '../types';
 
-const GROUPS     = ['Head Office', 'Cake Factory', 'Meat Factory', 'Sulaywarehouse', 'Restaurant'];
+const GROUPS     = ['Head Office', 'Cake Factory', 'Meat Factory', 'Sulaywarehouse', 'Restaurant', 'Doka'];
 const SUB_GROUPS = ['Center Region', 'Western Region', 'Northern Region', 'Eastern Region'];
 
 function isAgentOnline(d: Device) {

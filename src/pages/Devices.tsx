@@ -28,7 +28,7 @@ const TYPES    = ['Laptop','Desktop','Phone','Tablet','Server','Printer','Networ
 const OS_LIST  = ['Windows','macOS','Linux','Android','iOS','Other'];
 const STATUSES = ['Online','Offline','Maintenance','Retired'];
 
-const GROUPS     = ['Head Office','Cake Factory','Meat Factory','Sulaywarehouse','Restaurant'];
+const GROUPS     = ['Head Office','Cake Factory','Meat Factory','Sulaywarehouse','Restaurant','Doka'];
 const SUB_GROUPS = ['Center Region','Western Region','Northern Region','Eastern Region'];
 
 function fmtBytes(b: number) {
