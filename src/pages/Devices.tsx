@@ -791,6 +791,8 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
   const [updatedAt,   setUpdatedAt]   = useState<string | null>(null);
   const [loading,     setLoading]     = useState(true);
   const [search,      setSearch]      = useState('');
+  // uninstall: maps app name → 'confirm' | 'pending' | 'queued' | 'failed'
+  const [uninstallState, setUninstallState] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetch(`/api/devices?id=${device.id}&software=1`)
@@ -808,6 +810,29 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
         a.name.toLowerCase().includes(search.toLowerCase()) ||
         (a.publisher ?? '').toLowerCase().includes(search.toLowerCase()))
     : apps;
+
+  function queueUninstall(appName: string) {
+    const cur = uninstallState[appName];
+    if (cur === 'confirm') {
+      // second click = confirmed → send command
+      setUninstallState(s => ({ ...s, [appName]: 'pending' }));
+      fetch('/api/commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: device.id, action: 'uninstall', software_name: appName }),
+      })
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(() => setUninstallState(s => ({ ...s, [appName]: 'queued' })))
+        .catch(() => setUninstallState(s => ({ ...s, [appName]: 'failed' })));
+    } else if (!cur || cur === 'failed') {
+      // first click = ask confirm
+      setUninstallState(s => ({ ...s, [appName]: 'confirm' }));
+      // auto-cancel confirm after 4 s if not clicked
+      setTimeout(() => {
+        setUninstallState(s => s[appName] === 'confirm' ? { ...s, [appName]: '' } : s);
+      }, 4000);
+    }
+  }
 
   function fmtInstallDate(d: string) {
     if (!d || d.length < 8) return '—';
@@ -895,10 +920,13 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
                     <th className="text-left px-4 py-2.5 w-36">Version</th>
                     <th className="text-left px-4 py-2.5 w-44">Publisher</th>
                     <th className="text-left px-4 py-2.5 w-28">Installed</th>
+                    <th className="px-4 py-2.5 w-28"></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((app, i) => (
+                  {filtered.map((app, i) => {
+                    const uState = uninstallState[app.name] ?? '';
+                    return (
                     <tr key={i} className="border-b border-slate-700/40 hover:bg-slate-700/30 transition group">
                       <td className="px-5 py-2 text-slate-600 text-xs font-mono">{i + 1}</td>
                       <td className="px-4 py-2 text-white font-medium max-w-xs">
@@ -909,8 +937,33 @@ const SoftwareModal: React.FC<SoftwareModalProps> = ({ device, onClose }) => {
                         <span className="truncate block max-w-[160px]">{app.publisher || '—'}</span>
                       </td>
                       <td className="px-4 py-2 text-slate-500 text-xs whitespace-nowrap">{fmtInstallDate(app.install_date)}</td>
+                      <td className="px-4 py-2 text-right">
+                        {uState === 'queued' ? (
+                          <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-2 py-0.5">
+                            Queued ✓
+                          </span>
+                        ) : uState === 'pending' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400 ml-auto" />
+                        ) : uState === 'confirm' ? (
+                          <button
+                            onClick={() => queueUninstall(app.name)}
+                            className="text-[10px] font-bold text-white bg-red-600 hover:bg-red-500 rounded-full px-2.5 py-1 transition whitespace-nowrap"
+                          >
+                            Confirm?
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => queueUninstall(app.name)}
+                            className="opacity-0 group-hover:opacity-100 transition p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10"
+                            title="Uninstall"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
               {filtered.length === 0 && (

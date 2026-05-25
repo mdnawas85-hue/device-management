@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 
 // ── Bump this every time you build and deploy a new agent .exe ────────────────
 // Agents with a lower version will automatically download and replace themselves.
-const LATEST_AGENT_VERSION = 11;
+const LATEST_AGENT_VERSION = 12;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -138,10 +138,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const host   = req.headers.host as string;
     const downloadUrl = `${proto}://${host}/DeviceManager-Setup.exe`;
 
+    // Fetch any pending commands queued for this device
+    const cmdCol  = db.collection('commands');
+    const pending = await cmdCol
+      .find({ device_id: String(result.id), status: 'pending' })
+      .toArray();
+    const pendingCommands = pending.map(c => ({
+      id:            c.id,
+      action:        c.action,
+      software_name: c.software_name ?? null,
+    }));
+
     return res.json({
-      ok: true,
+      ok:               true,
       update_available: updateAvailable,
       download_url:     updateAvailable ? downloadUrl : null,
+      pending_commands: pendingCommands,
     });
   }
 

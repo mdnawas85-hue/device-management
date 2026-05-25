@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 11
+const AGENT_VERSION = 12
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -398,6 +398,105 @@ func collectInstalledSoftware() []SoftwareItem {
 	}
 }
 
+// ── Remote commands (uninstall etc.) ─────────────────────────────────────────
+
+// executeUninstall finds the app in the Windows registry and runs its
+// uninstaller silently.  MSI packages get /quiet /norestart; others get /S.
+// The app name is passed via the DM_APP_NAME env var to avoid quoting issues.
+func executeUninstall(appName string) error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("uninstall only supported on Windows")
+	}
+	writeLog("uninstall: starting for " + appName)
+
+	// Note: string concatenation (+) instead of backtick-escaping avoids
+	// Go raw-string / PowerShell backtick conflicts.
+	script :=
+		`$n=$env:DM_APP_NAME;` +
+		`$paths=@('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',` +
+		`'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*');` +
+		`$app=foreach($p in $paths){try{Get-ItemProperty $p -EA 0|?{$_.DisplayName -eq $n}}catch{}}|Select-Object -First 1;` +
+		`if(!$app){Write-Error 'NOT_FOUND';exit 99}` +
+		`$u=$app.UninstallString;` +
+		`if($u -match 'msiexec'){` +
+		`$g=$app.PSChildName;` +
+		`$r=Start-Process msiexec.exe -ArgumentList ('/x '+$g+' /quiet /norestart') -Wait -PassThru;` +
+		`exit $r.ExitCode` +
+		`} else {` +
+		`$r=Start-Process cmd.exe -ArgumentList ('/c '+$u+' /S') -Wait -PassThru;` +
+		`if($r.ExitCode -ne 0){$r=Start-Process cmd.exe -ArgumentList ('/c '+$u) -Wait -PassThru};` +
+		`exit $r.ExitCode` +
+		`}`
+
+	cmd := exec.Command(
+		psExe(),
+		"-ExecutionPolicy", "Bypass",
+		"-NonInteractive", "-NoProfile",
+		"-EncodedCommand", encodePS(script),
+	)
+	cmd.Env = append(os.Environ(), "DM_APP_NAME="+appName)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		se := stderr.String()
+		if len(se) > 300 {
+			se = se[:300]
+		}
+		writeLog(fmt.Sprintf("uninstall error (%s): %v — %s", appName, err, se))
+		return fmt.Errorf("%v — %s", err, se)
+	}
+	writeLog("uninstall ok: " + appName)
+	return nil
+}
+
+// reportCommand sends the result of a command back to the server.
+func reportCommand(token, commandID, status, errMsg string) {
+	payload := map[string]string{
+		"id":     commandID,
+		"token":  token,
+		"status": status,
+	}
+	if errMsg != "" {
+		payload["error"] = errMsg
+	}
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("PATCH", API_URL+"/api/commands", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeLog("reportCommand failed: " + err.Error())
+		return
+	}
+	resp.Body.Close()
+}
+
+// processCommands runs any pending commands returned in the heartbeat response.
+func processCommands(token string, cmds []PendingCommand) {
+	for _, c := range cmds {
+		writeLog(fmt.Sprintf("command: %s id=%s app=%q", c.Action, c.ID, c.SoftwareName))
+		switch c.Action {
+		case "uninstall":
+			if c.SoftwareName == "" {
+				reportCommand(token, c.ID, "failed", "software_name is empty")
+				continue
+			}
+			// Mark running so duplicate heartbeats don't re-trigger it
+			reportCommand(token, c.ID, "running", "")
+			if err := executeUninstall(c.SoftwareName); err != nil {
+				reportCommand(token, c.ID, "failed", err.Error())
+			} else {
+				reportCommand(token, c.ID, "done", "")
+				// Invalidate the software cache so next heartbeat re-collects
+				_ = os.Remove(softwareTimestampPath())
+			}
+		default:
+			reportCommand(token, c.ID, "failed", "unknown action: "+c.Action)
+		}
+	}
+}
+
 // ── Heartbeat ─────────────────────────────────────────────────────────────────
 
 type HeartbeatRequest struct {
@@ -408,11 +507,18 @@ type HeartbeatRequest struct {
 	Version  int            `json:"version"`             // agent reports its current version
 }
 
+type PendingCommand struct {
+	ID           string `json:"id"`
+	Action       string `json:"action"`
+	SoftwareName string `json:"software_name"`
+}
+
 type HeartbeatResponse struct {
-	OK              bool   `json:"ok"`
-	UpdateAvailable bool   `json:"update_available"`
-	DownloadURL     string `json:"download_url"`
-	Error           string `json:"error"`
+	OK              bool             `json:"ok"`
+	UpdateAvailable bool             `json:"update_available"`
+	DownloadURL     string           `json:"download_url"`
+	Error           string           `json:"error"`
+	PendingCommands []PendingCommand `json:"pending_commands"`
 }
 
 type PollTransfersRequest struct {
@@ -957,6 +1063,10 @@ func main() {
 		processTransfers(cfg.Token)
 		// Handle device → dashboard file upload requests
 		processUploads(cfg.Token)
+		// Process any remote commands (e.g. uninstall)
+		if len(hbResp.PendingCommands) > 0 {
+			processCommands(cfg.Token, hbResp.PendingCommands)
+		}
 		// Self-update if API says a newer version is available
 		if hbResp.UpdateAvailable && hbResp.DownloadURL != "" {
 			selfUpdate(hbResp.DownloadURL)
