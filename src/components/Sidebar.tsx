@@ -1,11 +1,12 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Monitor, LogOut } from 'lucide-react';
+import { LayoutDashboard, Monitor, Layers, LogOut } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 const NAV = [
   { to: '/',        icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/devices', icon: Monitor,         label: 'Devices'   },
+  { to: '/groups',  icon: Layers,          label: 'Groups'    },
 ];
 
 export const Sidebar: React.FC = () => (
