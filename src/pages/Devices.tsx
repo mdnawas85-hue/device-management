@@ -963,9 +963,21 @@ const ScriptModal: React.FC<ScriptModalProps> = ({ device, onClose }) => {
 // ── RDP Modal ─────────────────────────────────────────────────────────────────
 interface RdpModalProps { device: Device; onClose: () => void; }
 const RdpModal: React.FC<RdpModalProps> = ({ device, onClose }) => {
-  const ip       = device.ip_address ?? device.hardware?.ip_addresses?.[0] ?? '';
-  const hostname = device.hostname   ?? device.device_name;
-  const target   = ip || hostname;
+  const hostname = device.hostname ?? device.device_name;
+
+  // Build deduplicated IP list, LAN IPs first
+  const allIPs: string[] = [];
+  const addIP = (ip: string | null | undefined) => {
+    if (ip && !allIPs.includes(ip) && !ip.includes(':')) allIPs.push(ip);
+  };
+  // Prefer stored ip_address (already best-picked by server)
+  addIP(device.ip_address);
+  (device.hardware?.ip_addresses ?? []).forEach(addIP);
+
+  const lanIPs  = allIPs.filter(ip => ip.startsWith('10.') || ip.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(ip));
+  const otherIPs = allIPs.filter(ip => !lanIPs.includes(ip));
+
+  const [target, setTarget] = useState(lanIPs[0] ?? allIPs[0] ?? hostname);
   const [copied, setCopied] = useState(false);
 
   function copyIp() {
@@ -1033,22 +1045,51 @@ const RdpModal: React.FC<RdpModalProps> = ({ device, onClose }) => {
         {/* Body */}
         <div className="px-6 py-5 space-y-5">
 
-          {/* IP / Hostname row */}
-          <div className="bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Address</p>
-              <p className="text-sm font-mono font-semibold text-white">
-                {target || <span className="text-slate-500 font-normal">No IP address on record</span>}
-              </p>
-              {ip && hostname !== ip && (
-                <p className="text-xs text-slate-500 mt-0.5">{hostname}</p>
-              )}
+          {/* IP picker */}
+          <div className="space-y-2">
+            <p className="text-[10px] text-slate-500 uppercase tracking-wider">Select address to connect</p>
+            {allIPs.length === 0 && (
+              <p className="text-xs text-slate-500">No IP address found for this device</p>
+            )}
+            {lanIPs.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-[10px] text-emerald-500 font-semibold">LAN (recommended)</p>
+                {lanIPs.map(ip => (
+                  <button key={ip} onClick={() => setTarget(ip)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border font-mono text-sm transition ${
+                      target === ip ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' : 'bg-slate-900 border-slate-700 text-white hover:border-slate-500'
+                    }`}>
+                    {ip}
+                    {target === ip && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                ))}
+              </div>
+            )}
+            {otherIPs.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-[10px] text-amber-500 font-semibold">Link-local / other (may not work remotely)</p>
+                {otherIPs.map(ip => (
+                  <button key={ip} onClick={() => setTarget(ip)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border font-mono text-sm transition ${
+                      target === ip ? 'bg-amber-500/15 border-amber-500/40 text-amber-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'
+                    }`}>
+                    {ip}
+                    {target === ip && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                ))}
+              </div>
+            )}
+            {/* Manual entry */}
+            <div className="flex items-center gap-2 pt-1">
+              <input value={target} onChange={e => setTarget(e.target.value)}
+                placeholder="Or type hostname / IP…"
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white placeholder-slate-600 outline-none focus:border-cyan-500" />
+              <button onClick={copyIp} disabled={!target}
+                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs transition disabled:opacity-40">
+                {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? 'Copied' : 'Copy'}
+              </button>
             </div>
-            <button onClick={copyIp} disabled={!target}
-              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium transition disabled:opacity-40">
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              {copied ? 'Copied' : 'Copy'}
-            </button>
           </div>
 
           {/* Actions */}

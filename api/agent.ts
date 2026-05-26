@@ -39,7 +39,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         { $set: {
             agent_token: token, hardware: hw, last_seen: now, updated_at: now,
             status: 'Online',
-            ...(firstIP ? { ip_address: firstIP } : {}),
+            ...(bestIP ? { ip_address: bestIP } : {}),
             ...(serial  ? { serial_number: serial } : {}),
         }},
       );
@@ -105,8 +105,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!token) return res.status(400).json({ error: 'token is required' });
 
     const now = new Date().toISOString();
-    const firstIP = Array.isArray(hw?.ip_addresses) && hw.ip_addresses.length
-      ? String(hw.ip_addresses[0]) : null;
+
+    // Prefer a real LAN IP over link-local (169.254.x.x) or loopback
+    function pickBestIP(ips: unknown[]): string | null {
+      if (!Array.isArray(ips) || !ips.length) return null;
+      const strIPs = ips.map(String).filter(ip => !ip.includes(':'));
+      const lan = strIPs.find(ip =>
+        ip.startsWith('10.')      ||
+        ip.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+      );
+      if (lan) return lan;
+      // Fall back to any non-link-local IPv4
+      const nonLocal = strIPs.find(ip => !ip.startsWith('169.254.') && !ip.startsWith('127.'));
+      return nonLocal ?? strIPs[0] ?? null;
+    }
+
+    const bestIP = Array.isArray(hw?.ip_addresses) ? pickBestIP(hw.ip_addresses as unknown[]) : null;
     const serial = hw?.serial_number ? String(hw.serial_number) : null;
 
     const setFields: Record<string, unknown> = {
@@ -115,7 +130,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       updated_at:    now,
       status:        'Online',
       agent_version: agentVersion,
-      ...(firstIP ? { ip_address: firstIP } : {}),
+      ...(bestIP ? { ip_address: bestIP } : {}),
       ...(serial  ? { serial_number: serial } : {}),
     };
 
