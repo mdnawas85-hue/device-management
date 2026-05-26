@@ -13,7 +13,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ── GET — list commands for a device (dashboard) ──────────────────────────
   if (req.method === 'GET') {
-    const { device_id } = req.query;
+    const { device_id, id } = req.query;
+    // Single command poll (script output polling)
+    if (id) {
+      const cmd = await col.findOne({ id: String(id) });
+      if (!cmd) return res.status(404).json({ error: 'Not found' });
+      return res.json(cmd);
+    }
     if (!device_id) return res.status(400).json({ error: 'device_id required' });
     const commands = await col
       .find({ device_id: String(device_id) })
@@ -26,18 +32,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // ── POST — dashboard creates a command ────────────────────────────────────
   if (req.method === 'POST') {
     const body = req.body as Record<string, unknown>;
-    const { device_id, action, software_name } = body;
+    const { device_id, action, software_name, script_content, script_type } = body;
     if (!device_id || !action) return res.status(400).json({ error: 'device_id and action required' });
     const now = new Date().toISOString();
     const command = {
-      id:            randomUUID(),
-      device_id:     String(device_id),
-      action:        String(action),
-      software_name: software_name ? String(software_name) : null,
-      status:        'pending',
-      error:         null,
-      created_at:    now,
-      completed_at:  null,
+      id:             randomUUID(),
+      device_id:      String(device_id),
+      action:         String(action),
+      software_name:  software_name  ? String(software_name)  : null,
+      script_content: script_content ? String(script_content) : null,
+      script_type:    script_type    ? String(script_type)    : 'powershell',
+      output:         null,
+      status:         'pending',
+      error:          null,
+      created_at:     now,
+      completed_at:   null,
     };
     await col.insertOne(command as any);
     return res.status(201).json(command);
@@ -46,7 +55,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // ── PATCH — agent reports result ──────────────────────────────────────────
   if (req.method === 'PATCH') {
     const body  = req.body as Record<string, unknown>;
-    const { id, token, status, error } = body;
+    const { id, token, status, error, output } = body;
     if (!id || !status) return res.status(400).json({ error: 'id and status required' });
 
     // Verify the command belongs to the device that owns this token
@@ -59,7 +68,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const now    = new Date().toISOString();
     const result = await col.findOneAndUpdate(
       query,
-      { $set: { status: String(status), error: error ? String(error) : null, completed_at: now } },
+      { $set: {
+          status:       String(status),
+          error:        error  ? String(error)  : null,
+          output:       output ? String(output) : null,
+          completed_at: now,
+      }},
       { returnDocument: 'after' },
     );
     if (!result) return res.status(404).json({ error: 'Command not found' });

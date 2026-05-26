@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 12
+const AGENT_VERSION = 13
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -451,19 +451,20 @@ func executeUninstall(appName string) error {
 }
 
 // reportCommand sends the result of a command back to the server.
-func reportCommand(token, commandID, status, errMsg string) {
-	payload := map[string]string{
-		"id":     commandID,
-		"token":  token,
-		"status": status,
+// output is the captured stdout/stderr of a script (empty for non-script commands).
+func reportCommand(token, commandID, status, output, errMsg string) {
+	type Payload struct {
+		ID     string `json:"id"`
+		Token  string `json:"token"`
+		Status string `json:"status"`
+		Output string `json:"output,omitempty"`
+		Error  string `json:"error,omitempty"`
 	}
-	if errMsg != "" {
-		payload["error"] = errMsg
-	}
-	body, _ := json.Marshal(payload)
+	p := Payload{ID: commandID, Token: token, Status: status, Output: output, Error: errMsg}
+	body, _ := json.Marshal(p)
 	req, _ := http.NewRequest("PATCH", API_URL+"/api/commands", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		writeLog("reportCommand failed: " + err.Error())
@@ -472,27 +473,95 @@ func reportCommand(token, commandID, status, errMsg string) {
 	resp.Body.Close()
 }
 
+// executeScript runs a PowerShell or CMD script and returns combined output.
+// Output is capped at 60 KB to stay within API limits.
+func executeScript(scriptType, content string) (string, error) {
+	writeLog("script: executing type=" + scriptType)
+	var cmd *exec.Cmd
+
+	if scriptType == "cmd" {
+		// Write a temp .bat file so we don't need to deal with cmd escaping
+		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("dm_%d.bat", time.Now().UnixNano()))
+		_ = os.WriteFile(tmpFile, []byte("@echo off\r\n"+content), 0644)
+		defer os.Remove(tmpFile)
+		cmd = exec.Command("cmd.exe", "/c", tmpFile)
+	} else {
+		// PowerShell via -EncodedCommand
+		cmd = exec.Command(
+			psExe(),
+			"-ExecutionPolicy", "Bypass",
+			"-NonInteractive", "-NoProfile",
+			"-EncodedCommand", encodePS(content),
+		)
+	}
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out // combine so user sees errors inline
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+
+	const timeout = 120 * time.Second
+	select {
+	case err := <-done:
+		output := out.String()
+		if len(output) > 60000 {
+			output = output[:60000] + "\n... (output truncated at 60 KB)"
+		}
+		if err != nil {
+			writeLog(fmt.Sprintf("script: finished with error: %v", err))
+			return output, err
+		}
+		writeLog(fmt.Sprintf("script: finished ok, %d bytes output", len(output)))
+		return output, nil
+	case <-time.After(timeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		writeLog("script: timed out after 120s")
+		return out.String() + "\n... (timed out after 120s)", fmt.Errorf("timeout after 120s")
+	}
+}
+
 // processCommands runs any pending commands returned in the heartbeat response.
 func processCommands(token string, cmds []PendingCommand) {
 	for _, c := range cmds {
-		writeLog(fmt.Sprintf("command: %s id=%s app=%q", c.Action, c.ID, c.SoftwareName))
+		writeLog(fmt.Sprintf("command: %s id=%s", c.Action, c.ID))
 		switch c.Action {
+
 		case "uninstall":
 			if c.SoftwareName == "" {
-				reportCommand(token, c.ID, "failed", "software_name is empty")
+				reportCommand(token, c.ID, "failed", "", "software_name is empty")
 				continue
 			}
-			// Mark running so duplicate heartbeats don't re-trigger it
-			reportCommand(token, c.ID, "running", "")
+			reportCommand(token, c.ID, "running", "", "")
 			if err := executeUninstall(c.SoftwareName); err != nil {
-				reportCommand(token, c.ID, "failed", err.Error())
+				reportCommand(token, c.ID, "failed", "", err.Error())
 			} else {
-				reportCommand(token, c.ID, "done", "")
-				// Invalidate the software cache so next heartbeat re-collects
-				_ = os.Remove(softwareTimestampPath())
+				reportCommand(token, c.ID, "done", "", "")
+				_ = os.Remove(softwareTimestampPath()) // re-collect software list
 			}
+
+		case "run_script":
+			if c.ScriptContent == "" {
+				reportCommand(token, c.ID, "failed", "", "script_content is empty")
+				continue
+			}
+			reportCommand(token, c.ID, "running", "", "")
+			sType := c.ScriptType
+			if sType == "" {
+				sType = "powershell"
+			}
+			output, err := executeScript(sType, c.ScriptContent)
+			if err != nil {
+				reportCommand(token, c.ID, "failed", output, err.Error())
+			} else {
+				reportCommand(token, c.ID, "done", output, "")
+			}
+
 		default:
-			reportCommand(token, c.ID, "failed", "unknown action: "+c.Action)
+			reportCommand(token, c.ID, "failed", "", "unknown action: "+c.Action)
 		}
 	}
 }
@@ -508,9 +577,11 @@ type HeartbeatRequest struct {
 }
 
 type PendingCommand struct {
-	ID           string `json:"id"`
-	Action       string `json:"action"`
-	SoftwareName string `json:"software_name"`
+	ID            string `json:"id"`
+	Action        string `json:"action"`
+	SoftwareName  string `json:"software_name"`
+	ScriptContent string `json:"script_content"`
+	ScriptType    string `json:"script_type"` // "powershell" | "cmd"
 }
 
 type HeartbeatResponse struct {

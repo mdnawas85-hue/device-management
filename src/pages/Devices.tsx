@@ -4,7 +4,7 @@ import {
   CheckCircle2, AlertCircle, ChevronDown, ChevronRight,
   Cpu, MemoryStick, HardDrive, Activity, Download,
   UploadCloud, DownloadCloud, FileText, X, Clock, CheckCheck, FolderOpen,
-  Package, ScreenShare, Copy, Check,
+  Package, ScreenShare, Copy, Check, Terminal, Play,
 } from 'lucide-react';
 import type { Device, SoftwareItem, FileTransfer, FileUploadRequest, BrowseResult, BrowseItem, BrowseDrive } from '../types';
 
@@ -785,6 +785,171 @@ const FileManagerModal: React.FC<FileManagerProps> = ({ device, onClose }) => {
 };
 
 // ── Software Modal ────────────────────────────────────────────────────────────
+// ── Script Runner Modal ───────────────────────────────────────────────────────
+const QUICK_SCRIPTS: { label: string; type: 'powershell' | 'cmd'; script: string }[] = [
+  { label: 'System Info',    type: 'powershell', script: 'Get-ComputerInfo | Select-Object CsName,OsName,OsVersion,CsProcessors,CsTotalPhysicalMemory | Format-List' },
+  { label: 'Running Procs',  type: 'powershell', script: 'Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Name,Id,CPU,WorkingSet | Format-Table -AutoSize' },
+  { label: 'Disk Usage',     type: 'powershell', script: 'Get-PSDrive -PSProvider FileSystem | Select-Object Name,@{N="Used(GB)";E={[math]::Round($_.Used/1GB,1)}},@{N="Free(GB)";E={[math]::Round($_.Free/1GB,1)}} | Format-Table -AutoSize' },
+  { label: 'Network Config', type: 'cmd',        script: 'ipconfig /all' },
+  { label: 'Logged-in User', type: 'powershell', script: 'Get-WmiObject -Class Win32_ComputerSystem | Select-Object UserName,Name | Format-List' },
+  { label: 'Last 20 Events', type: 'powershell', script: 'Get-EventLog -LogName System -Newest 20 | Select-Object TimeGenerated,EntryType,Source,Message | Format-Table -AutoSize -Wrap' },
+  { label: 'Services',       type: 'powershell', script: 'Get-Service | Where-Object {$_.Status -eq "Running"} | Sort-Object DisplayName | Select-Object Name,DisplayName,Status | Format-Table -AutoSize' },
+  { label: 'Installed Apps', type: 'powershell', script: 'Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Where-Object DisplayName | Select-Object DisplayName,DisplayVersion,Publisher | Sort-Object DisplayName | Format-Table -AutoSize' },
+];
+
+interface ScriptModalProps { device: Device; onClose: () => void; }
+const ScriptModal: React.FC<ScriptModalProps> = ({ device, onClose }) => {
+  const [scriptType, setScriptType] = useState<'powershell' | 'cmd'>('powershell');
+  const [script,     setScript]     = useState('');
+  const [status,     setStatus]     = useState<'idle' | 'pending' | 'running' | 'done' | 'failed'>('idle');
+  const [output,     setOutput]     = useState('');
+  const [, setCmdId] = useState('');
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function stopPolling() {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }
+
+  React.useEffect(() => () => stopPolling(), []);
+
+  function pollResult(id: string) {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/commands?id=${id}`);
+        const d = await r.json();
+        if (d.status === 'done' || d.status === 'failed') {
+          stopPolling();
+          setStatus(d.status);
+          setOutput(d.output ?? (d.status === 'failed' ? (d.error ?? 'Unknown error') : '(no output)'));
+        } else {
+          setStatus(d.status);
+        }
+      } catch { /* network error — keep polling */ }
+    }, 3000);
+  }
+
+  async function runScript() {
+    if (!script.trim()) return;
+    setStatus('pending');
+    setOutput('');
+    stopPolling();
+    try {
+      const r = await fetch('/api/commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: device.id, action: 'run_script', script_content: script, script_type: scriptType }),
+      });
+      const cmd = await r.json();
+      setCmdId(cmd.id);
+      pollResult(cmd.id);
+    } catch {
+      setStatus('failed');
+      setOutput('Failed to send command to server.');
+    }
+  }
+
+  const statusColors = { idle: '', pending: 'text-amber-400', running: 'text-blue-400', done: 'text-emerald-400', failed: 'text-red-400' };
+  const statusLabel  = { idle: '', pending: 'Waiting for agent…', running: 'Running…', done: 'Done', failed: 'Failed' };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+         onClick={onClose}>
+      <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col"
+           style={{ height: '88vh' }} onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-green-500/15 border border-green-500/20 flex items-center justify-center">
+              <Terminal className="w-4 h-4 text-green-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-white">Script Runner</h2>
+              <p className="text-xs text-slate-400">{device.device_name}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {status !== 'idle' && (
+              <span className={`text-xs font-semibold ${statusColors[status]} flex items-center gap-1.5`}>
+                {(status === 'pending' || status === 'running') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {statusLabel[status]}
+              </span>
+            )}
+            <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Script type tabs + Quick scripts */}
+        <div className="px-4 pt-3 pb-2 border-b border-slate-700/60 shrink-0 space-y-2">
+          <div className="flex items-center gap-2">
+            {(['powershell', 'cmd'] as const).map(t => (
+              <button key={t} onClick={() => setScriptType(t)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
+                  scriptType === t
+                    ? 'bg-green-600 border-green-500 text-white'
+                    : 'bg-slate-800 border-slate-600 text-slate-400 hover:text-white'
+                }`}>
+                {t === 'powershell' ? 'PowerShell' : 'CMD'}
+              </button>
+            ))}
+            <span className="text-slate-600 text-xs ml-1">Quick:</span>
+            <div className="flex gap-1.5 flex-wrap">
+              {QUICK_SCRIPTS.map(q => (
+                <button key={q.label}
+                  onClick={() => { setScript(q.script); setScriptType(q.type); }}
+                  className="text-[10px] px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-600 transition">
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Editor + Output split */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Script editor */}
+          <div className="relative shrink-0" style={{ height: '35%' }}>
+            <textarea
+              value={script}
+              onChange={e => setScript(e.target.value)}
+              placeholder={scriptType === 'powershell' ? '# Enter PowerShell script…\nGet-Process | Select-Object Name,CPU | Sort-Object CPU -Descending' : 'REM Enter CMD commands…\nipconfig /all'}
+              spellCheck={false}
+              className="w-full h-full bg-slate-950 text-green-300 font-mono text-xs p-4 resize-none outline-none placeholder-slate-600 border-b border-slate-700"
+            />
+            <button
+              onClick={runScript}
+              disabled={!script.trim() || status === 'pending' || status === 'running'}
+              className="absolute bottom-3 right-3 flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold transition">
+              {(status === 'pending' || status === 'running')
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Running…</>
+                : <><Play className="w-3.5 h-3.5" /> Run</>
+              }
+            </button>
+          </div>
+
+          {/* Output terminal */}
+          <div className="flex-1 overflow-y-auto bg-slate-950 p-4">
+            {output ? (
+              <pre className={`font-mono text-xs whitespace-pre-wrap leading-relaxed ${status === 'failed' ? 'text-red-400' : 'text-slate-200'}`}>
+                {output}
+              </pre>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-slate-600 gap-2">
+                <Terminal className="w-8 h-8 opacity-30" />
+                <p className="text-xs">Output will appear here</p>
+                <p className="text-[10px] text-slate-700">Agent executes within ~1 minute · results auto-refresh</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── RDP Modal ─────────────────────────────────────────────────────────────────
 interface RdpModalProps { device: Device; onClose: () => void; }
 const RdpModal: React.FC<RdpModalProps> = ({ device, onClose }) => {
@@ -1243,6 +1408,7 @@ export const Devices: React.FC = () => {
   const [collectDev,   setCollectDev]   = useState<Device | null>(null);
   const [softwareDev,  setSoftwareDev]  = useState<Device | null>(null);
   const [rdpDev,       setRdpDev]       = useState<Device | null>(null);
+  const [scriptDev,    setScriptDev]    = useState<Device | null>(null);
   const [delConf,      setDelConf]      = useState<string | null>(null);
   const [delId,        setDelId]        = useState<string | null>(null);
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
@@ -1470,6 +1636,14 @@ export const Devices: React.FC = () => {
                                 <Package className="w-3.5 h-3.5" />
                               </button>
                             )}
+                            {/* Script runner */}
+                            {hasAgent && (
+                              <button onClick={() => setScriptDev(d)}
+                                title="Run script"
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-green-400 hover:bg-green-500/10 transition">
+                                <Terminal className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             {/* RDP */}
                             {(d.ip_address || d.hardware?.ip_addresses?.[0]) && (
                               <button onClick={() => setRdpDev(d)}
@@ -1507,6 +1681,7 @@ export const Devices: React.FC = () => {
       {modal === 'new'           && <Modal device={null}  onClose={() => setModal(null)} onSaved={handleSaved} />}
       {transferDev               && <FileTransferModal device={transferDev} onClose={() => setTransferDev(null)} />}
       {collectDev                && <FileManagerModal   device={collectDev}  onClose={() => setCollectDev(null)} />}
+      {scriptDev                 && <ScriptModal        device={scriptDev}   onClose={() => setScriptDev(null)}   />}
       {rdpDev                    && <RdpModal           device={rdpDev}      onClose={() => setRdpDev(null)}      />}
       {softwareDev               && <SoftwareModal      device={softwareDev} onClose={() => setSoftwareDev(null)} />}
     </div>
