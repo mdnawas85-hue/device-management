@@ -1372,6 +1372,12 @@ const HardwareRow: React.FC<{ d: Device }> = ({ d }) => {
           {/* Network */}
           <div>
             <div className="flex items-center gap-1.5 text-slate-400 mb-2"><Activity className="w-3.5 h-3.5" /><span className="font-semibold">Network</span></div>
+            {hw.public_ip && (
+              <p className="text-cyan-400 font-mono font-semibold flex items-center gap-1.5 mb-0.5">
+                <span className="text-[10px] text-slate-500 font-sans font-normal">PUBLIC</span>
+                {hw.public_ip}
+              </p>
+            )}
             {(hw.ip_addresses ?? []).filter(ip => !ip.includes(':')).map((ip, i) => (
               <p key={i} className="text-white font-mono">{ip}</p>
             ))}

@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 14
+const AGENT_VERSION = 15
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -95,6 +95,7 @@ type HardwareInfo struct {
 	DiskUsed     uint64   `json:"disk_used"`
 	DiskFree     uint64   `json:"disk_free"`
 	IPAddresses  []string `json:"ip_addresses"`
+	PublicIP     string   `json:"public_ip"`
 	MACAddress   string   `json:"mac_address"`
 	SerialNumber string   `json:"serial_number"`
 	LoggedUser   string   `json:"logged_user"`
@@ -205,8 +206,35 @@ func collectHardware() HardwareInfo {
 		}
 	}
 	h.IPAddresses = append(ips4, ips6...)
+	h.PublicIP = fetchPublicIP()
 
 	return h
+}
+
+// fetchPublicIP asks an external service for the device's public/WAN IP.
+// Tries two services; returns empty string on failure.
+func fetchPublicIP() string {
+	services := []string{
+		"https://api.ipify.org",
+		"https://checkip.amazonaws.com",
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, url := range services {
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		ip := strings.TrimSpace(string(body))
+		if ip != "" && len(ip) < 50 { // sanity check — not an HTML page
+			return ip
+		}
+	}
+	return ""
 }
 
 func round2(v float64) float64 {

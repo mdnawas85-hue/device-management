@@ -15,6 +15,7 @@ export interface HardwareInfo {
   disk_used?:    number;
   disk_free?:    number;
   ip_addresses?: string[];
+  public_ip?:    string;
   mac_address?:  string;
   serial_number?: string;
   logged_user?:  string;
