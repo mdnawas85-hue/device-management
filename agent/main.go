@@ -23,7 +23,7 @@ import (
 
 // ── Version — bump this each time you build and deploy a new .exe ─────────────
 // The API holds LATEST_AGENT_VERSION; if agent's version is lower, it self-updates.
-const AGENT_VERSION = 13
+const AGENT_VERSION = 14
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -940,6 +940,7 @@ func fmtSize(b int) string {
 // Downloads the new .exe, writes a batch script to swap it after we exit,
 // then launches the batch and exits. Next scheduled-task run uses the new binary.
 func selfUpdate(downloadURL string) {
+	writeLog(fmt.Sprintf("selfUpdate: starting download from %s", downloadURL))
 	dir := agentDir()
 	os.MkdirAll(dir, 0755)
 
@@ -950,36 +951,52 @@ func selfUpdate(downloadURL string) {
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Get(downloadURL)
 	if err != nil {
+		writeLog("selfUpdate: download failed: " + err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		writeLog("selfUpdate: read body failed: " + err.Error())
+		return
+	}
+	if len(data) < 1024 {
+		writeLog(fmt.Sprintf("selfUpdate: download suspiciously small (%d bytes), aborting", len(data)))
 		return
 	}
 	if err := os.WriteFile(newExe, data, 0755); err != nil {
+		writeLog("selfUpdate: write new exe failed: " + err.Error())
 		return
 	}
+	writeLog(fmt.Sprintf("selfUpdate: downloaded %d bytes to %s", len(data), newExe))
 
 	if runtime.GOOS == "windows" {
-		// Batch script: wait 3s (so we can exit), swap exe, clean up
+		// Batch: retry the move up to 10 times with 2s delays (exe may be locked briefly)
 		bat := filepath.Join(dir, "update.bat")
 		script := fmt.Sprintf(
-			"@echo off\r\ntimeout /t 3 /nobreak > NUL\r\nmove /y \"%s\" \"%s\"\r\ndel \"%%~f0\"\r\n",
+			"@echo off\r\n"+
+				"set NEW=\"%s\"\r\n"+
+				"set CUR=\"%s\"\r\n"+
+				"for /L %%%%i in (1,1,10) do (\r\n"+
+				"  timeout /t 2 /nobreak > NUL\r\n"+
+				"  move /y %%NEW%% %%CUR%% > NUL 2>&1\r\n"+
+				"  if not errorlevel 1 goto :done\r\n"+
+				")\r\n"+
+				":done\r\n"+
+				"del \"%%%%~f0\"\r\n",
 			newExe, curExe,
 		)
 		if err := os.WriteFile(bat, []byte(script), 0755); err != nil {
+			writeLog("selfUpdate: write bat failed: " + err.Error())
 			return
 		}
-		// Launch batch detached so it survives after we exit
+		writeLog("selfUpdate: launching update.bat and exiting")
 		exec.Command("cmd", "/c", "start", "", "/min", bat).Start()
 	} else {
-		// Non-Windows: just overwrite directly (not running from install path)
 		os.Rename(newExe, curExe)
 	}
 
-	// Exit so the batch can overwrite us
 	os.Exit(0)
 }
 

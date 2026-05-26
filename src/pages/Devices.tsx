@@ -804,10 +804,13 @@ const ScriptModal: React.FC<ScriptModalProps> = ({ device, onClose }) => {
   const [status,     setStatus]     = useState<'idle' | 'pending' | 'running' | 'done' | 'failed'>('idle');
   const [output,     setOutput]     = useState('');
   const [, setCmdId] = useState('');
+  const [elapsed,    setElapsed]    = useState(0);
+  const elapsedRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
   function stopPolling() {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
   }
 
   React.useEffect(() => () => stopPolling(), []);
@@ -833,7 +836,9 @@ const ScriptModal: React.FC<ScriptModalProps> = ({ device, onClose }) => {
     if (!script.trim()) return;
     setStatus('pending');
     setOutput('');
+    setElapsed(0);
     stopPolling();
+    elapsedRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
     try {
       const r = await fetch('/api/commands', {
         method: 'POST',
@@ -871,10 +876,15 @@ const ScriptModal: React.FC<ScriptModalProps> = ({ device, onClose }) => {
           </div>
           <div className="flex items-center gap-3">
             {status !== 'idle' && (
-              <span className={`text-xs font-semibold ${statusColors[status]} flex items-center gap-1.5`}>
-                {(status === 'pending' || status === 'running') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                {statusLabel[status]}
-              </span>
+              <div className="flex flex-col items-end gap-0.5">
+                <span className={`text-xs font-semibold ${statusColors[status]} flex items-center gap-1.5`}>
+                  {(status === 'pending' || status === 'running') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {statusLabel[status]}{(status === 'pending' || status === 'running') ? ` (${elapsed}s)` : ''}
+                </span>
+                {status === 'pending' && elapsed > 90 && (
+                  <span className="text-[10px] text-amber-500">Agent may need manual update — re-run Setup.exe</span>
+                )}
+              </div>
             )}
             <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition">
               <X className="w-4 h-4" />

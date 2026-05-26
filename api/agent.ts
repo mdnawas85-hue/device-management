@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 
 // ── Bump this every time you build and deploy a new agent .exe ────────────────
 // Agents with a lower version will automatically download and replace themselves.
-const LATEST_AGENT_VERSION = 13;
+const LATEST_AGENT_VERSION = 14;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
