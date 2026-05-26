@@ -1042,22 +1042,13 @@ const RdpModal: React.FC<RdpModalProps> = ({ device, onClose }) => {
           </div>
 
           {/* Actions */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3">
             <button onClick={downloadRdp} disabled={!target}
-              className="flex flex-col items-center gap-2 px-4 py-4 rounded-xl bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 text-cyan-400 transition disabled:opacity-40 disabled:cursor-not-allowed">
-              <Download className="w-5 h-5" />
-              <div className="text-center">
-                <p className="text-xs font-semibold">Download .rdp</p>
-                <p className="text-[10px] text-cyan-400/60 mt-0.5">Open with RDP client</p>
-              </div>
-            </button>
-            <button onClick={() => { if (target) window.location.href = `ms-rd:full%20address=s:${target}`; }}
-              disabled={!target}
-              className="flex flex-col items-center gap-2 px-4 py-4 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 text-blue-400 transition disabled:opacity-40 disabled:cursor-not-allowed">
+              className="flex flex-col items-center gap-2 px-4 py-4 rounded-xl bg-cyan-500/10 border border-cyan-500/20 hover:bg-cyan-500/20 text-cyan-400 transition disabled:opacity-40 disabled:cursor-not-allowed col-span-2 w-full">
               <ScreenShare className="w-5 h-5" />
               <div className="text-center">
-                <p className="text-xs font-semibold">Connect Now</p>
-                <p className="text-[10px] text-blue-400/60 mt-0.5">Opens RDP on Windows</p>
+                <p className="text-xs font-semibold">Connect via RDP</p>
+                <p className="text-[10px] text-cyan-400/60 mt-0.5">Downloads <span className="font-mono">{hostname}.rdp</span> → double-click to connect</p>
               </div>
             </button>
           </div>
